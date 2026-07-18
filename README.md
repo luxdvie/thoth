@@ -22,8 +22,8 @@ uv run thoth.py
 
 That's it. First run pulls the model (~600 MB), then you're live:
 
-- ✍️ Finalized sentences print with `[H:MM:SS]` stamps — once committed, a line **never changes** (finalization trails realtime by ~15–20 s; the live line stays current)
-- 🔮 The in-flight text updates on a live ticker line as the model changes its mind
+- ✍️ Sentences print promptly, one per line, with `[H:MM:SS]` stamps
+- 🔮 The in-flight sentence updates on a live ticker line as the model changes its mind — and the transcript file continuously self-corrects as the decode refines
 - 🎭 `--speakers` *(experimental)* — voice-fingerprints each sentence (TitaNet embeddings, online clustering) and tags it `Speaker N`, color-coded. Works on clean audio; still being tuned for far-field party chaos
 - 💾 Full transcript rewritten to `sessions/session-<date>.md` every ~2 seconds — **a crash loses nothing**
 - 🛑 `Ctrl-C` ends the session

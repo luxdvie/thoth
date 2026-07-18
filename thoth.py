@@ -27,7 +27,6 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 from parakeet_mlx import from_pretrained
-from parakeet_mlx.alignment import tokens_to_sentences
 
 CHUNK_SECONDS = 2.0
 MIN_EMBED_SECONDS = 0.5
@@ -104,10 +103,10 @@ class SpeakerLog:
         return self.last
 
 
-def render(committed: list[tuple[float, int | None, str]], live: str) -> str:
+def render(rows: list[tuple[float, int | None, str]], live: str) -> str:
     lines = [
         f"{stamp(start)} **Speaker {label + 1}:** {text}" if label is not None else f"{stamp(start)} {text}"
-        for start, label, text in committed
+        for start, label, text in rows
     ]
     if live:
         lines.append(f"… {live}")
@@ -177,60 +176,78 @@ def main() -> None:
         ensure_embed_model(), rate, args.speaker_threshold, args.max_speakers
     ) if args.speakers else None
 
-    committed: list[tuple[float, int | None, str]] = []  # (start, speaker, text) — never mutated
-    buf = np.zeros(0, dtype=np.float32)  # retained audio for not-yet-committed speech
+    # Parakeet's streaming token timestamps are window-relative — once the cache
+    # drops old frames they no longer reflect stream time (every stamp reads
+    # 0:00:00 in a long session). So thoth keeps its own clock: samples fed ÷
+    # rate, and stamps each sentence when it first appears in the decode.
+    stream_t = 0.0
+    starts: list[float] = []  # our timestamp per sentence index
+    labels: list[int | None] = []  # speaker per printed sentence
+    printed = 0
+    buf = np.zeros(0, dtype=np.float32)  # retained audio for unlabeled speech
     buf_start = 0  # absolute sample index of buf[0]
 
-    def commit(sentence) -> None:
-        """Label a stable sentence from retained audio, print it, trim the buffer."""
+    def commit(i: int, text: str, hi_time: float) -> None:
+        """Print sentence i once, labeling its [starts[i], hi_time] audio if enabled."""
         nonlocal buf, buf_start
-        lo = max(0, int(sentence.start * rate) - buf_start)
-        hi = max(0, int(sentence.end * rate) - buf_start)
-        label = speakers.label(buf[lo:hi]) if speakers else None
-        buf = buf[hi:]
-        buf_start += hi
-        committed.append((sentence.start, label, sentence.text.strip()))
-        tprint(*committed[-1])
+        label = None
+        if speakers is not None:
+            lo = max(0, int(starts[i] * rate) - buf_start)
+            hi = max(0, int(hi_time * rate) - buf_start)
+            label = speakers.label(buf[lo:hi])
+            buf = buf[hi:]
+            buf_start += hi
+        labels.append(label)
+        tprint(starts[i], label, text)
 
     chunks = wav_chunks(args.wav, rate) if args.wav else mic_chunks(rate, args.device)
     with model.transcribe_stream(context_size=(256, 256), depth=1) as streamer:
         print(f"Recording. Transcript → {outfile}  (Ctrl-C to stop)", file=sys.stderr)
         try:
             for chunk in chunks:
-                buf = np.concatenate([buf, chunk])
+                stream_t += len(chunk) / rate
+                if speakers is not None:
+                    buf = np.concatenate([buf, chunk])
                 streamer.add_audio(mx.array(chunk))
+                sentences = streamer.result.sentences
+                while len(starts) < len(sentences):  # new sentence began ~now
+                    starts.append(max(0.0, stream_t - CHUNK_SECONDS))
+                printed = min(printed, max(0, len(sentences) - 1))
 
-                # Only sentences built purely from finalized tokens are immutable;
-                # the last of them may still grow, so hold it back too.
-                stable = tokens_to_sentences(
-                    streamer.finalized_tokens, streamer.decoding_config.sentence
-                )
-                for sentence in stable[len(committed) : -1]:
-                    commit(sentence)
+                # Terminal: print all but the still-mutating last sentence, once.
+                while printed < len(sentences) - 1:
+                    commit(printed, sentences[printed].text.strip(), starts[printed + 1])
+                    printed += 1
+                if sentences:
+                    width = shutil.get_terminal_size().columns - 4
+                    live = sentences[-1].text.strip()
+                    print(f"\x1b[2K\r… {live[-width:]}", end="", flush=True)
 
-                # Live line: everything after the committed prefix, draft included.
-                done = stable[len(committed) - 1].end if committed else 0.0
-                live = " ".join(
-                    s.text.strip() for s in streamer.result.sentences if s.end > done
-                ).strip()
-                width = shutil.get_terminal_size().columns - 4
-                print(f"\x1b[2K\r… {live[-width:]}", end="", flush=True)
-
-                # Disk: rewrite the whole file every chunk — crash-safe.
-                outfile.write_text(render(committed, live))
+                # Disk: rewrite the whole file every chunk from the current decode —
+                # crash-safe, and late refinements self-correct on disk.
+                rows = [
+                    (starts[i], labels[i] if i < len(labels) else None, s.text.strip())
+                    for i, s in enumerate(sentences[:-1])
+                ]
+                outfile.write_text(render(rows, sentences[-1].text.strip() if sentences else ""))
         except KeyboardInterrupt:
             pass
 
-        # Final flush: everything left, including the draft region, is now final.
-        done = committed[-1][0] if committed else -1.0
-        for sentence in streamer.result.sentences:
-            if sentence.start > done and sentence.text.strip():
-                commit(sentence)
-        if committed:
-            outfile.write_text(render(committed, ""))
+        # Final flush: the draft region is now as final as it will ever be.
+        sentences = streamer.result.sentences
+        while printed < len(sentences):
+            hi_time = starts[printed + 1] if printed + 1 < len(starts) else stream_t
+            commit(printed, sentences[printed].text.strip(), hi_time)
+            printed += 1
+        if sentences:
+            rows = [
+                (starts[i], labels[i] if i < len(labels) else None, s.text.strip())
+                for i, s in enumerate(sentences)
+            ]
+            outfile.write_text(render(rows, ""))
         tail = ""
         if speakers is not None:
-            n = len({label for _, label, _ in committed})
+            n = len({label for label in labels if label is not None})
             tail = f"  ({n} speaker{'s' if n != 1 else ''})"
         print(f"\x1b[2K\rSession saved: {outfile}{tail}", file=sys.stderr)
 
