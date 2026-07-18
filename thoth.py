@@ -19,6 +19,7 @@ Usage:
 import argparse
 import datetime
 import queue
+import shutil
 import sys
 import urllib.request
 from pathlib import Path
@@ -26,8 +27,10 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 from parakeet_mlx import from_pretrained
+from parakeet_mlx.alignment import tokens_to_sentences
 
 CHUNK_SECONDS = 2.0
+MIN_EMBED_SECONDS = 0.5
 EMBED_MODEL_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
     "speaker-recongition-models/nemo_en_titanet_small.onnx"
@@ -55,23 +58,28 @@ def ensure_embed_model() -> Path:
 
 
 class SpeakerLog:
-    """Online speaker identification: embed each finalized sentence, match against
-    running centroids by cosine similarity, mint a new speaker below threshold."""
+    """Online speaker identification over sentence-sized audio slices.
 
-    def __init__(self, model_path: Path, rate: int, threshold: float):
+    Two-tier matching: a loose floor decides which existing speaker a slice
+    belongs to; only confident matches (floor + margin) update that speaker's
+    centroid, so noisy far-field segments can't drift the voiceprints."""
+
+    def __init__(self, model_path: Path, rate: int, threshold: float, max_speakers: int):
         import sherpa_onnx
 
         self.extractor = sherpa_onnx.SpeakerEmbeddingExtractor(
             sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(model_path), num_threads=2)
         )
         self.rate = rate
-        self.threshold = threshold
+        self.assign_floor = threshold
+        self.update_floor = threshold + 0.15
+        self.max_speakers = max_speakers
         self.centroids: list[np.ndarray] = []
         self.counts: list[int] = []
         self.last = 0
 
     def label(self, samples: np.ndarray) -> int:
-        if len(samples) < int(0.3 * self.rate):
+        if len(samples) < int(MIN_EMBED_SECONDS * self.rate):
             return self.last  # too short to embed reliably; assume same voice
         stream = self.extractor.create_stream()
         stream.accept_waveform(self.rate, samples)
@@ -82,11 +90,12 @@ class SpeakerLog:
         if self.centroids:
             sims = [float(np.dot(emb, c)) for c in self.centroids]
             best = int(np.argmax(sims))
-            if sims[best] >= self.threshold:
-                n = self.counts[best]
-                self.centroids[best] = (self.centroids[best] * n + emb) / (n + 1)
-                self.centroids[best] /= np.linalg.norm(self.centroids[best])
-                self.counts[best] += 1
+            if sims[best] >= self.assign_floor or len(self.centroids) >= self.max_speakers:
+                if sims[best] >= self.update_floor:
+                    n = self.counts[best]
+                    self.centroids[best] = (self.centroids[best] * n + emb) / (n + 1)
+                    self.centroids[best] /= np.linalg.norm(self.centroids[best])
+                    self.counts[best] += 1
                 self.last = best
                 return best
         self.centroids.append(emb)
@@ -95,21 +104,16 @@ class SpeakerLog:
         return self.last
 
 
-def render(sentences, labels) -> str:
-    lines = []
-    for i, s in enumerate(sentences):
-        if i < len(labels):
-            lines.append(f"{stamp(s.start)} **Speaker {labels[i] + 1}:** {s.text.strip()}")
-        else:
-            lines.append(f"{stamp(s.start)} … {s.text.strip()}")
+def render(committed: list[tuple[float, int, str]], live: str) -> str:
+    lines = [f"{stamp(start)} **Speaker {label + 1}:** {text}" for start, label, text in committed]
+    if live:
+        lines.append(f"… {live}")
     return "\n".join(lines) + "\n"
 
 
-def tprint(sentence, label: int) -> None:
+def tprint(start: float, label: int, text: str) -> None:
     color = SPEAKER_COLORS[label % len(SPEAKER_COLORS)]
-    print(
-        f"\x1b[2K\r{stamp(sentence.start)} {color}Speaker {label + 1}:{RESET} {sentence.text.strip()}"
-    )
+    print(f"\x1b[2K\r{stamp(start)} {color}Speaker {label + 1}:{RESET} {text}")
 
 
 def mic_chunks(rate: int, device):
@@ -152,7 +156,8 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path("sessions"))
     parser.add_argument("--device", default=None, help="Input device name or index (see `python -m sounddevice`)")
     parser.add_argument("--no-speakers", action="store_true", help="Disable speaker labeling")
-    parser.add_argument("--speaker-threshold", type=float, default=0.55, help="Cosine similarity cutoff for 'same speaker' (lower = fewer, broader speakers)")
+    parser.add_argument("--speaker-threshold", type=float, default=0.45, help="Same-speaker similarity floor (lower = fewer, broader speakers)")
+    parser.add_argument("--max-speakers", type=int, default=8, help="Never mint more than N speakers; extras snap to the nearest voice")
     parser.add_argument("--wav", type=Path, default=None, help=argparse.SUPPRESS)  # testing: 16k mono wav instead of mic
     args = parser.parse_args()
 
@@ -162,21 +167,27 @@ def main() -> None:
     print(f"Loading {args.model} …", file=sys.stderr)
     model = from_pretrained(args.model)
     rate = model.preprocessor_config.sample_rate
-    speakers = None if args.no_speakers else SpeakerLog(ensure_embed_model(), rate, args.speaker_threshold)
+    speakers = None if args.no_speakers else SpeakerLog(
+        ensure_embed_model(), rate, args.speaker_threshold, args.max_speakers
+    )
 
-    labels: list[int] = []  # labels[i] belongs to sentences[i], assigned on finalize
-    buf = np.zeros(0, dtype=np.float32)  # retained audio for pending sentences
+    committed: list[tuple[float, int, str]] = []  # (start, speaker, text) — never mutated
+    buf = np.zeros(0, dtype=np.float32)  # retained audio for not-yet-committed speech
     buf_start = 0  # absolute sample index of buf[0]
 
-    def commit(sentence, buf, buf_start):
-        """Label a finalized sentence from retained audio; trim the buffer past it."""
+    def commit(sentence) -> None:
+        """Label a stable sentence from retained audio, print it, trim the buffer."""
+        nonlocal buf, buf_start
         if speakers is None:
-            labels.append(0)
-            return buf, buf_start
-        lo = max(0, int(sentence.start * rate) - buf_start)
-        hi = max(0, int(sentence.end * rate) - buf_start)
-        labels.append(speakers.label(buf[lo:hi]))
-        return buf[hi:], buf_start + hi
+            label = 0
+        else:
+            lo = max(0, int(sentence.start * rate) - buf_start)
+            hi = max(0, int(sentence.end * rate) - buf_start)
+            label = speakers.label(buf[lo:hi])
+            buf = buf[hi:]
+            buf_start += hi
+        committed.append((sentence.start, label, sentence.text.strip()))
+        tprint(*committed[-1])
 
     chunks = wav_chunks(args.wav, rate) if args.wav else mic_chunks(rate, args.device)
     with model.transcribe_stream(context_size=(256, 256), depth=1) as streamer:
@@ -185,29 +196,36 @@ def main() -> None:
             for chunk in chunks:
                 buf = np.concatenate([buf, chunk])
                 streamer.add_audio(mx.array(chunk))
-                sentences = streamer.result.sentences
-                if not sentences:
-                    continue
 
-                # Commit all but the still-mutating last sentence.
-                while len(labels) < len(sentences) - 1:
-                    buf, buf_start = commit(sentences[len(labels)], buf, buf_start)
-                    tprint(sentences[len(labels) - 1], labels[-1])
-                live = sentences[-1].text.strip()[-100:]
-                print(f"\x1b[2K\r… {live}", end="", flush=True)
+                # Only sentences built purely from finalized tokens are immutable;
+                # the last of them may still grow, so hold it back too.
+                stable = tokens_to_sentences(
+                    streamer.finalized_tokens, streamer.decoding_config.sentence
+                )
+                for sentence in stable[len(committed) : -1]:
+                    commit(sentence)
+
+                # Live line: everything after the committed prefix, draft included.
+                done = stable[len(committed) - 1].end if committed else 0.0
+                live = " ".join(
+                    s.text.strip() for s in streamer.result.sentences if s.end > done
+                ).strip()
+                width = shutil.get_terminal_size().columns - 4
+                print(f"\x1b[2K\r… {live[-width:]}", end="", flush=True)
 
                 # Disk: rewrite the whole file every chunk — crash-safe.
-                outfile.write_text(render(sentences, labels))
+                outfile.write_text(render(committed, live))
         except KeyboardInterrupt:
             pass
 
-        sentences = streamer.result.sentences
-        while len(labels) < len(sentences):  # label the tail, including the draft
-            buf, buf_start = commit(sentences[len(labels)], buf, buf_start)
-            tprint(sentences[len(labels) - 1], labels[-1])
-        if sentences:
-            outfile.write_text(render(sentences, labels))
-        n_speakers = len(set(labels)) if labels else 0
+        # Final flush: everything left, including the draft region, is now final.
+        done = committed[-1][0] if committed else -1.0
+        for sentence in streamer.result.sentences:
+            if sentence.start > done and sentence.text.strip():
+                commit(sentence)
+        if committed:
+            outfile.write_text(render(committed, ""))
+        n_speakers = len({label for _, label, _ in committed})
         print(f"\x1b[2K\rSession saved: {outfile}  ({n_speakers} speaker{'s' if n_speakers != 1 else ''})", file=sys.stderr)
 
 

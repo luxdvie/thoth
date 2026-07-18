@@ -22,7 +22,7 @@ uv run thoth.py
 
 That's it. First run pulls the models (~600 MB Parakeet + 40 MB TitaNet), then you're live:
 
-- ✍️ Finalized sentences print with `[H:MM:SS]` stamps
+- ✍️ Finalized sentences print with `[H:MM:SS]` stamps — once committed, a line **never changes** (finalization trails realtime by ~15–20 s; the live line stays current)
 - 🎭 **Speaker labels** — each finalized sentence is voice-fingerprinted (TitaNet embeddings, online clustering) and tagged `Speaker N`, color-coded in the terminal
 - 🔮 The in-flight sentence updates in place as the model changes its mind
 - 💾 Full transcript rewritten to `sessions/session-<date>.md` every ~2 seconds — **a crash loses nothing**
@@ -38,7 +38,8 @@ Four hours of table time becomes a searchable, timestamped campaign log. Feed it
 | `--device NAME` | Pick a mic — list with `uv run --with sounddevice python -m sounddevice` |
 | `--model ID` | Any parakeet-mlx-compatible Hugging Face model |
 | `--no-speakers` | Skip speaker labeling |
-| `--speaker-threshold X` | Same-speaker similarity cutoff (default `0.55`; lower it if one person keeps splitting into two) |
+| `--speaker-threshold X` | Same-speaker similarity floor (default `0.45`; lower it if one person keeps splitting into two) |
+| `--max-speakers N` | Hard cap on distinct speakers (default `8`) — set it to your table size |
 
 ## 🧱 What it is (and isn't)
 
