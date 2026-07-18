@@ -104,14 +104,20 @@ class SpeakerLog:
         return self.last
 
 
-def render(committed: list[tuple[float, int, str]], live: str) -> str:
-    lines = [f"{stamp(start)} **Speaker {label + 1}:** {text}" for start, label, text in committed]
+def render(committed: list[tuple[float, int | None, str]], live: str) -> str:
+    lines = [
+        f"{stamp(start)} **Speaker {label + 1}:** {text}" if label is not None else f"{stamp(start)} {text}"
+        for start, label, text in committed
+    ]
     if live:
         lines.append(f"… {live}")
     return "\n".join(lines) + "\n"
 
 
-def tprint(start: float, label: int, text: str) -> None:
+def tprint(start: float, label: int | None, text: str) -> None:
+    if label is None:
+        print(f"\x1b[2K\r{stamp(start)} {text}")
+        return
     color = SPEAKER_COLORS[label % len(SPEAKER_COLORS)]
     print(f"\x1b[2K\r{stamp(start)} {color}Speaker {label + 1}:{RESET} {text}")
 
@@ -155,7 +161,7 @@ def main() -> None:
     parser.add_argument("--model", default="mlx-community/parakeet-tdt-0.6b-v2")
     parser.add_argument("--out", type=Path, default=Path("sessions"))
     parser.add_argument("--device", default=None, help="Input device name or index (see `python -m sounddevice`)")
-    parser.add_argument("--no-speakers", action="store_true", help="Disable speaker labeling")
+    parser.add_argument("--speakers", action="store_true", help="Experimental: label sentences by voice (Speaker 1/2/…)")
     parser.add_argument("--speaker-threshold", type=float, default=0.45, help="Same-speaker similarity floor (lower = fewer, broader speakers)")
     parser.add_argument("--max-speakers", type=int, default=8, help="Never mint more than N speakers; extras snap to the nearest voice")
     parser.add_argument("--wav", type=Path, default=None, help=argparse.SUPPRESS)  # testing: 16k mono wav instead of mic
@@ -167,25 +173,22 @@ def main() -> None:
     print(f"Loading {args.model} …", file=sys.stderr)
     model = from_pretrained(args.model)
     rate = model.preprocessor_config.sample_rate
-    speakers = None if args.no_speakers else SpeakerLog(
+    speakers = SpeakerLog(
         ensure_embed_model(), rate, args.speaker_threshold, args.max_speakers
-    )
+    ) if args.speakers else None
 
-    committed: list[tuple[float, int, str]] = []  # (start, speaker, text) — never mutated
+    committed: list[tuple[float, int | None, str]] = []  # (start, speaker, text) — never mutated
     buf = np.zeros(0, dtype=np.float32)  # retained audio for not-yet-committed speech
     buf_start = 0  # absolute sample index of buf[0]
 
     def commit(sentence) -> None:
         """Label a stable sentence from retained audio, print it, trim the buffer."""
         nonlocal buf, buf_start
-        if speakers is None:
-            label = 0
-        else:
-            lo = max(0, int(sentence.start * rate) - buf_start)
-            hi = max(0, int(sentence.end * rate) - buf_start)
-            label = speakers.label(buf[lo:hi])
-            buf = buf[hi:]
-            buf_start += hi
+        lo = max(0, int(sentence.start * rate) - buf_start)
+        hi = max(0, int(sentence.end * rate) - buf_start)
+        label = speakers.label(buf[lo:hi]) if speakers else None
+        buf = buf[hi:]
+        buf_start += hi
         committed.append((sentence.start, label, sentence.text.strip()))
         tprint(*committed[-1])
 
@@ -225,8 +228,11 @@ def main() -> None:
                 commit(sentence)
         if committed:
             outfile.write_text(render(committed, ""))
-        n_speakers = len({label for _, label, _ in committed})
-        print(f"\x1b[2K\rSession saved: {outfile}  ({n_speakers} speaker{'s' if n_speakers != 1 else ''})", file=sys.stderr)
+        tail = ""
+        if speakers is not None:
+            n = len({label for _, label, _ in committed})
+            tail = f"  ({n} speaker{'s' if n != 1 else ''})"
+        print(f"\x1b[2K\rSession saved: {outfile}{tail}", file=sys.stderr)
 
 
 if __name__ == "__main__":
