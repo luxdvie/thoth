@@ -1,0 +1,5 @@
+sessions/
+__pycache__/
+*.wav
+*.aiff
+.DS_Store
