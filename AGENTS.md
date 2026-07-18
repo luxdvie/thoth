@@ -6,7 +6,8 @@ Realtime local speech-to-text for tabletop sessions. One file of product code: `
 
 - **PEP 723 single-file script.** Dependencies live in the inline `# /// script` block at the top of `thoth.py`. There is no pyproject, no lockfile, no package. Run with `uv run thoth.py`.
 - **Pipeline:** sounddevice `InputStream` (16 kHz mono float32, 2 s blocks) → queue → `parakeet_mlx` `StreamingParakeet.add_audio()` → `result.sentences` (each has `.text`, `.start`, `.end`).
-- **Output contract:** finalized sentences print once with `[H:MM:SS]` stamps; the last (still-mutating) sentence renders on a live line via `\x1b[2K\r`. The whole transcript file is rewritten every chunk — that's deliberate crash-safety, not inefficiency; don't "optimize" it into append-only.
+- **Speaker layer:** raw audio is retained in `buf` (trimmed as sentences finalize). When a sentence finalizes, its `[start, end]` slice is embedded via sherpa-onnx TitaNet (auto-downloaded to `~/.cache/thoth/`, 40 MB, ungated) and matched against running speaker centroids by cosine similarity (`SpeakerLog`); below `--speaker-threshold` mints a new speaker. Sub-0.3 s slices inherit the previous speaker. This is speaker ID by sentence clustering, not true diarization — no overlap handling.
+- **Output contract:** finalized sentences print once with `[H:MM:SS]` stamps and color-coded `Speaker N:` prefixes; the last (still-mutating) sentence renders on a live line via `\x1b[2K\r` with no label. The whole transcript file is rewritten every chunk — that's deliberate crash-safety, not inefficiency; don't "optimize" it into append-only.
 
 ## Constraints learned the hard way
 
@@ -23,9 +24,15 @@ say -o test.aiff "Roll for initiative."
 afconvert -f WAVE -d LEI16@16000 -c 1 test.aiff test.wav
 ```
 
-Then load the wav (stdlib `wave` + numpy int16 → float32 / 32768) and loop `add_audio` in 2 s chunks. Assert on `result.text` and sentence timestamps. Model weights cache under `~/.cache/huggingface` after first download (~600 MB).
+Then run the real pipeline against it with the hidden test flag:
+
+```sh
+uv run thoth.py --wav test.wav --out /tmp/testout
+```
+
+For speaker-label testing, synthesize with two voices (`say -v Samantha …`, `say -v Daniel …`), concatenate with ~0.6 s silence gaps, and assert alternating labels. TTS voices separate at cosine ~0.2 vs ~0.9 same-voice, so threshold regressions show up clearly. Model weights cache under `~/.cache/huggingface` (~600 MB) and `~/.cache/thoth/` (40 MB).
 
 ## Known gaps (intentional, v2 territory)
 
-- No speaker diarization — multiple voices interleave into one stream.
+- Speaker ID, not diarization: no overlapping-speech separation; similar voices can merge.
 - English-tuned default model.
