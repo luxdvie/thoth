@@ -21,7 +21,9 @@ import datetime
 import queue
 import shutil
 import struct
+import subprocess
 import sys
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -123,6 +125,69 @@ def tprint(start: float, label: int | None, text: str) -> None:
     print(f"\x1b[2K\r{stamp(start)} {color}Speaker {label + 1}:{RESET} {text}")
 
 
+NOTE_PROMPT = (
+    "You are live-posting a D&D session from a transcript excerpt. In one short "
+    "sentence of at most 15 words, in the style 'the group is fishing' / 'the group "
+    "found a poison needle', say what the party is doing right now. The transcript "
+    "is noisy speech-to-text; ignore garbled fragments. If nothing meaningfully new "
+    "has happened since the previous post, output exactly SKIP. Output only the "
+    "sentence, no quotes.\n\nPrevious post: {prev}\n\nTranscript excerpt:\n{text}"
+)
+
+
+class NoteTaker:
+    """Periodic 'twitter post' summaries of the transcript. Each note is produced
+    by piping a prompt into `cmd` (stdin → stdout) on a background thread, so the
+    audio loop never blocks; completed notes are drained by the main loop."""
+
+    def __init__(self, path: Path, cmd: str, interval: float):
+        self.path = path
+        self.cmd = cmd
+        self.interval = interval
+        self.last_t = 0.0
+        self.mark = 0  # sentence index already summarized
+        self.prev_note = "(none yet)"
+        self.results: queue.Queue[tuple[float, str]] = queue.Queue()
+        self.threads: list[threading.Thread] = []
+
+    def maybe_fire(self, stream_t: float, sentences) -> None:
+        if stream_t - self.last_t < self.interval or len(sentences) <= self.mark:
+            return
+        text = "\n".join(s.text.strip() for s in sentences[self.mark :])
+        self.last_t, self.mark = stream_t, len(sentences)
+        t = threading.Thread(target=self._summarize, args=(stream_t, text), daemon=True)
+        self.threads.append(t)
+        t.start()
+
+    def _summarize(self, t: float, text: str) -> None:
+        try:
+            out = subprocess.run(
+                self.cmd, shell=True, capture_output=True, timeout=120,
+                input=NOTE_PROMPT.format(prev=self.prev_note, text=text).encode(),
+            )
+            note = out.stdout.decode().strip().splitlines()[-1].strip() if out.stdout.strip() else ""
+        except Exception as e:
+            print(f"\n[notes] summarizer failed: {e}", file=sys.stderr)
+            return
+        if note and note != "SKIP":
+            self.prev_note = note
+            self.results.put((t, note))
+
+    def drain(self) -> None:
+        while not self.results.empty():
+            t, note = self.results.get()
+            with open(self.path, "a") as f:
+                f.write(f"- {stamp(t)} {note}\n")
+            print(f"\x1b[2K\r🐦 {stamp(t)} \x1b[3m{note}\x1b[0m")
+
+    def finish(self, stream_t: float, sentences) -> None:
+        self.last_t = -self.interval  # force one closing note
+        self.maybe_fire(stream_t, sentences)
+        for t in self.threads:
+            t.join(timeout=130)
+        self.drain()
+
+
 class WavWriter:
     """Incremental 16-bit mono WAV writer. The RIFF/data sizes in the header are
     re-patched after every write, so the file is playable even after a crash."""
@@ -218,6 +283,9 @@ def main() -> None:
     parser.add_argument("--speakers", action="store_true", help="Experimental: label sentences by voice (Speaker 1/2/…)")
     parser.add_argument("--speaker-threshold", type=float, default=0.45, help="Same-speaker similarity floor (lower = fewer, broader speakers)")
     parser.add_argument("--max-speakers", type=int, default=8, help="Never mint more than N speakers; extras snap to the nearest voice")
+    parser.add_argument("--notes", action="store_true", help="Periodic one-line 'what's happening' posts to key-notes-<session>.md (uses the claude CLI by default)")
+    parser.add_argument("--notes-interval", type=float, default=180, metavar="SEC", help="Seconds between notes (default 180)")
+    parser.add_argument("--notes-cmd", default="claude -p --model haiku", help="Shell command that reads a prompt on stdin and prints the post (default: %(default)s)")
     parser.add_argument("--save-audio", action="store_true", help="Also record the session to a wav next to the transcript (~110 MB/hour), enabling --polish later")
     parser.add_argument("--polish", type=Path, default=None, metavar="AUDIO", help="Re-transcribe a session recording offline with full context (better accuracy) and exit")
     parser.add_argument("--wav", type=Path, default=None, help=argparse.SUPPRESS)  # testing: 16k mono wav instead of mic
@@ -238,6 +306,11 @@ def main() -> None:
     session = f"session-{datetime.datetime.now():%Y-%m-%d-%H%M}"
     outfile = args.out / f"{session}.md"
     recorder = WavWriter(args.out / f"{session}.wav", rate) if args.save_audio else None
+    notes = None
+    if args.notes:
+        if shutil.which(args.notes_cmd.split()[0]) is None:
+            sys.exit(f"--notes needs `{args.notes_cmd.split()[0]}` on PATH (or pass --notes-cmd)")
+        notes = NoteTaker(args.out / f"key-notes-{session.removeprefix('session-')}.md", args.notes_cmd, args.notes_interval)
 
     # Parakeet's streaming token timestamps are window-relative — once the cache
     # drops old frames they no longer reflect stream time (every stamp reads
@@ -278,6 +351,9 @@ def main() -> None:
                 while len(starts) < len(sentences):  # new sentence began ~now
                     starts.append(max(0.0, stream_t - CHUNK_SECONDS))
                 printed = min(printed, max(0, len(sentences) - 1))
+                if notes is not None:
+                    notes.maybe_fire(stream_t, sentences)
+                    notes.drain()
 
                 # Terminal: print all but the still-mutating last sentence, once.
                 while printed < len(sentences) - 1:
@@ -314,6 +390,10 @@ def main() -> None:
         if speakers is not None:
             n = len({label for label in labels if label is not None})
             tail = f"  ({n} speaker{'s' if n != 1 else ''})"
+        if notes is not None and sentences:
+            print("\x1b[2K\rWaiting for final note …", end="", file=sys.stderr, flush=True)
+            notes.finish(stream_t, sentences)
+            print(f"\x1b[2K\rKey notes: {notes.path}", file=sys.stderr)
         print(f"\x1b[2K\rSession saved: {outfile}{tail}", file=sys.stderr)
         if recorder is not None:
             recorder.close()

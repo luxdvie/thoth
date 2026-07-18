@@ -37,6 +37,9 @@ Four hours of table time becomes a searchable, timestamped campaign log. Feed it
 | `--out DIR` | Output directory (default `./sessions`) |
 | `--device NAME` | Pick a mic — list with `uv run --with sounddevice python -m sounddevice` |
 | `--model ID` | Any parakeet-mlx-compatible Hugging Face model |
+| `--notes` | 🐦 Live-post the session: a one-liner every few minutes to `key-notes-<session>.md` |
+| `--notes-interval SEC` | Seconds between posts (default `180`) |
+| `--notes-cmd CMD` | Summarizer command, prompt on stdin → post on stdout (default `claude -p --model haiku`) |
 | `--save-audio` | Also record the session to a `.wav` next to the transcript (~110 MB/hour) |
 | `--polish AUDIO` | Re-transcribe a recording offline with full context — noticeably more accurate than the live pass |
 | `--speakers` | Enable experimental speaker labeling (downloads 40 MB TitaNet model) |
@@ -53,6 +56,18 @@ uv run thoth.py --polish sessions/session-….wav  # then: full-context re-trans
 ```
 
 The polished pass re-reads the whole recording with full context — same model, better output, exact timestamps, minutes for a multi-hour session. `--speakers` works here too, and better than live (offline timestamps make the voice slicing precise). Live transcript for the table, polished one for the campaign log. 📖
+
+## 🐦 Live session feed
+
+`--notes` turns thoth into a play-by-play commentator. Every few minutes it hands the latest transcript to a summarizer and appends a one-line post:
+
+```
+- [0:12:00] The group is fishing for knucklehead trout.
+- [0:15:00] The group is arguing about who touched the trapped door.
+- [0:18:00] The group found the lake monster. It found them first.
+```
+
+Summaries run on a background thread — the transcription loop never blocks. The default summarizer is the `claude` CLI (Haiku), but `--notes-cmd` accepts any shell command that reads a prompt on stdin and prints a line: a local model via `ollama run`, or someday a script that posts straight to a stream overlay or social feed.
 
 ## 🧱 What it is (and isn't)
 
