@@ -20,6 +20,7 @@ import argparse
 import datetime
 import queue
 import shutil
+import struct
 import sys
 import urllib.request
 from pathlib import Path
@@ -27,6 +28,7 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 from parakeet_mlx import from_pretrained
+from parakeet_mlx.audio import load_audio
 
 CHUNK_SECONDS = 2.0
 MIN_EMBED_SECONDS = 0.5
@@ -121,6 +123,59 @@ def tprint(start: float, label: int | None, text: str) -> None:
     print(f"\x1b[2K\r{stamp(start)} {color}Speaker {label + 1}:{RESET} {text}")
 
 
+class WavWriter:
+    """Incremental 16-bit mono WAV writer. The RIFF/data sizes in the header are
+    re-patched after every write, so the file is playable even after a crash."""
+
+    def __init__(self, path: Path, rate: int):
+        self.f = open(path, "wb")
+        self.rate = rate
+        self.frames = 0
+        self._patch_header()
+
+    def _patch_header(self) -> None:
+        data = self.frames * 2
+        self.f.seek(0)
+        self.f.write(b"RIFF" + struct.pack("<I", 36 + data) + b"WAVE")
+        self.f.write(b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, self.rate, self.rate * 2, 2, 16))
+        self.f.write(b"data" + struct.pack("<I", data))
+
+    def write(self, samples: np.ndarray) -> None:
+        pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2")
+        self.f.seek(0, 2)
+        self.f.write(pcm.tobytes())
+        self.frames += len(pcm)
+        self._patch_header()
+        self.f.flush()
+
+    def close(self) -> None:
+        self._patch_header()
+        self.f.close()
+
+
+def polish(src: Path, model, rate: int, speakers: SpeakerLog | None) -> None:
+    """Offline full-context re-transcription of a session recording. Unlike the
+    streaming decode, sentence timestamps here are absolute and trustworthy."""
+    out = src.with_name(src.stem + "-polished.md")
+
+    def progress(cur, total):
+        print(f"\x1b[2K\rPolishing … {min(100, int(cur / total * 100))}%", end="", file=sys.stderr, flush=True)
+
+    result = model.transcribe(src, chunk_duration=120.0, chunk_callback=progress)
+    rows = []
+    samples = np.array(load_audio(src, rate, mx.float32)) if speakers else None
+    for s in result.sentences:
+        text = s.text.strip()
+        if not text:
+            continue
+        label = None
+        if speakers is not None:
+            label = speakers.label(samples[int(s.start * rate) : int(s.end * rate)])
+        rows.append((s.start, label, text))
+    out.write_text(render(rows, ""))
+    print(f"\x1b[2K\rPolished transcript: {out}  ({len(rows)} lines)", file=sys.stderr)
+
+
 def mic_chunks(rate: int, device):
     import sounddevice as sd
 
@@ -163,11 +218,10 @@ def main() -> None:
     parser.add_argument("--speakers", action="store_true", help="Experimental: label sentences by voice (Speaker 1/2/…)")
     parser.add_argument("--speaker-threshold", type=float, default=0.45, help="Same-speaker similarity floor (lower = fewer, broader speakers)")
     parser.add_argument("--max-speakers", type=int, default=8, help="Never mint more than N speakers; extras snap to the nearest voice")
+    parser.add_argument("--save-audio", action="store_true", help="Also record the session to a wav next to the transcript (~110 MB/hour), enabling --polish later")
+    parser.add_argument("--polish", type=Path, default=None, metavar="AUDIO", help="Re-transcribe a session recording offline with full context (better accuracy) and exit")
     parser.add_argument("--wav", type=Path, default=None, help=argparse.SUPPRESS)  # testing: 16k mono wav instead of mic
     args = parser.parse_args()
-
-    args.out.mkdir(parents=True, exist_ok=True)
-    outfile = args.out / f"session-{datetime.datetime.now():%Y-%m-%d-%H%M}.md"
 
     print(f"Loading {args.model} …", file=sys.stderr)
     model = from_pretrained(args.model)
@@ -175,6 +229,15 @@ def main() -> None:
     speakers = SpeakerLog(
         ensure_embed_model(), rate, args.speaker_threshold, args.max_speakers
     ) if args.speakers else None
+
+    if args.polish:
+        polish(args.polish, model, rate, speakers)
+        return
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    session = f"session-{datetime.datetime.now():%Y-%m-%d-%H%M}"
+    outfile = args.out / f"{session}.md"
+    recorder = WavWriter(args.out / f"{session}.wav", rate) if args.save_audio else None
 
     # Parakeet's streaming token timestamps are window-relative — once the cache
     # drops old frames they no longer reflect stream time (every stamp reads
@@ -206,6 +269,8 @@ def main() -> None:
         try:
             for chunk in chunks:
                 stream_t += len(chunk) / rate
+                if recorder is not None:
+                    recorder.write(chunk)
                 if speakers is not None:
                     buf = np.concatenate([buf, chunk])
                 streamer.add_audio(mx.array(chunk))
@@ -250,6 +315,9 @@ def main() -> None:
             n = len({label for label in labels if label is not None})
             tail = f"  ({n} speaker{'s' if n != 1 else ''})"
         print(f"\x1b[2K\rSession saved: {outfile}{tail}", file=sys.stderr)
+        if recorder is not None:
+            recorder.close()
+            print(f"Audio saved: {recorder.f.name} — refine with: uv run thoth.py --polish {recorder.f.name}", file=sys.stderr)
 
 
 if __name__ == "__main__":

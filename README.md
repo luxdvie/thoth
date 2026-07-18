@@ -37,9 +37,22 @@ Four hours of table time becomes a searchable, timestamped campaign log. Feed it
 | `--out DIR` | Output directory (default `./sessions`) |
 | `--device NAME` | Pick a mic — list with `uv run --with sounddevice python -m sounddevice` |
 | `--model ID` | Any parakeet-mlx-compatible Hugging Face model |
+| `--save-audio` | Also record the session to a `.wav` next to the transcript (~110 MB/hour) |
+| `--polish AUDIO` | Re-transcribe a recording offline with full context — noticeably more accurate than the live pass |
 | `--speakers` | Enable experimental speaker labeling (downloads 40 MB TitaNet model) |
 | `--speaker-threshold X` | Same-speaker similarity floor (default `0.45`) |
 | `--max-speakers N` | Hard cap on distinct speakers (default `8`) — set it to your table size |
+
+## ✨ Two-pass mode (best accuracy)
+
+Streaming decode trades a little accuracy for immediacy. Get both:
+
+```sh
+uv run thoth.py --save-audio                     # live transcript + session recording
+uv run thoth.py --polish sessions/session-….wav  # then: full-context re-transcription
+```
+
+The polished pass re-reads the whole recording with full context — same model, better output, exact timestamps, minutes for a multi-hour session. `--speakers` works here too, and better than live (offline timestamps make the voice slicing precise). Live transcript for the table, polished one for the campaign log. 📖
 
 ## 🧱 What it is (and isn't)
 
