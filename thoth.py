@@ -24,6 +24,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -150,28 +151,39 @@ class NoteTaker:
         self.results: queue.Queue[tuple[float, str]] = queue.Queue()
         self.threads: list[threading.Thread] = []
 
-    def maybe_fire(self, stream_t: float, sentences) -> None:
+    def maybe_fire(self, stream_t: float, sentences, starts: list[float]) -> None:
         if stream_t - self.last_t < self.interval or len(sentences) <= self.mark:
             return
+        # Stamp the note where its content BEGAN, not when it was summarized —
+        # a fire-time stamp reads one whole interval late against the transcript.
+        t0 = starts[self.mark] if self.mark < len(starts) else stream_t
         text = "\n".join(s.text.strip() for s in sentences[self.mark :])
         self.last_t, self.mark = stream_t, len(sentences)
-        t = threading.Thread(target=self._summarize, args=(stream_t, text), daemon=True)
+        t = threading.Thread(target=self._summarize, args=(t0, text), daemon=True)
         self.threads.append(t)
         t.start()
 
     def _summarize(self, t: float, text: str) -> None:
-        try:
-            out = subprocess.run(
-                self.cmd, shell=True, capture_output=True, timeout=120,
-                input=NOTE_PROMPT.format(prev=self.prev_note, text=text).encode(),
-            )
-            note = out.stdout.decode().strip().splitlines()[-1].strip() if out.stdout.strip() else ""
-        except Exception as e:
-            print(f"\n[notes] summarizer failed: {e}", file=sys.stderr)
-            return
-        if note and note != "SKIP":
-            self.prev_note = note
-            self.results.put((t, note))
+        err = ""
+        for attempt in (1, 2):
+            try:
+                out = subprocess.run(
+                    self.cmd, shell=True, capture_output=True, timeout=120,
+                    input=NOTE_PROMPT.format(prev=self.prev_note, text=text).encode(),
+                )
+                note = out.stdout.decode().strip()
+                if out.returncode == 0 and note:
+                    note = note.splitlines()[-1].strip()
+                    if note != "SKIP":
+                        self.prev_note = note
+                        self.results.put((t, note))
+                    return
+                err = out.stderr.decode().strip()[-200:] or f"exit {out.returncode}, empty output"
+            except Exception as e:
+                err = str(e)
+            if attempt == 1:
+                time.sleep(10)
+        print(f"\n[notes] {stamp(t)} summarizer failed twice, note lost: {err}", file=sys.stderr)
 
     def drain(self) -> None:
         while not self.results.empty():
@@ -180,11 +192,11 @@ class NoteTaker:
                 f.write(f"- {stamp(t)} {note}\n")
             print(f"\x1b[2K\r🐦 {stamp(t)} \x1b[3m{note}\x1b[0m")
 
-    def finish(self, stream_t: float, sentences) -> None:
+    def finish(self, stream_t: float, sentences, starts: list[float]) -> None:
         self.last_t = -self.interval  # force one closing note
-        self.maybe_fire(stream_t, sentences)
+        self.maybe_fire(stream_t, sentences, starts)
         for t in self.threads:
-            t.join(timeout=130)
+            t.join(timeout=280)
         self.drain()
 
 
@@ -352,7 +364,7 @@ def main() -> None:
                     starts.append(max(0.0, stream_t - CHUNK_SECONDS))
                 printed = min(printed, max(0, len(sentences) - 1))
                 if notes is not None:
-                    notes.maybe_fire(stream_t, sentences)
+                    notes.maybe_fire(stream_t, sentences, starts)
                     notes.drain()
 
                 # Terminal: print all but the still-mutating last sentence, once.
@@ -392,7 +404,7 @@ def main() -> None:
             tail = f"  ({n} speaker{'s' if n != 1 else ''})"
         if notes is not None and sentences:
             print("\x1b[2K\rWaiting for final note …", end="", file=sys.stderr, flush=True)
-            notes.finish(stream_t, sentences)
+            notes.finish(stream_t, sentences, starts)
             print(f"\x1b[2K\rKey notes: {notes.path}", file=sys.stderr)
         print(f"\x1b[2K\rSession saved: {outfile}{tail}", file=sys.stderr)
         if recorder is not None:
