@@ -19,6 +19,7 @@ Usage:
 import argparse
 import datetime
 import queue
+import re
 import shutil
 import struct
 import subprocess
@@ -134,6 +135,56 @@ NOTE_PROMPT = (
     "has happened since the previous post, output exactly SKIP. Output only the "
     "sentence, no quotes.\n\nPrevious post: {prev}\n\nTranscript excerpt:\n{text}"
 )
+
+
+ENRICH_PROMPT = (
+    "You are the chronicler of a D&D campaign. Below is a one-line headline from a "
+    "live session, and the raw speech-to-text transcript from those minutes (noisy; "
+    "ignore garbled fragments). Write a vivid 2-4 sentence account of what actually "
+    "happened — keep proper nouns, dice outcomes, decisions, and good table jokes. "
+    "Write in past tense. Output only the account, no headline, no quotes.\n\n"
+    "Headline: {headline}\n\nTranscript:\n{text}"
+)
+STAMP_RE = re.compile(r"^-? ?\[(\d+):(\d\d):(\d\d)\] (.*)$")
+
+
+def parse_stamped(path: Path) -> list[tuple[float, str]]:
+    rows = []
+    for line in path.read_text().splitlines():
+        if m := STAMP_RE.match(line):
+            h, mnt, s, text = m.groups()
+            rows.append((int(h) * 3600 + int(mnt) * 60 + int(s), text))
+    return rows
+
+
+def enrich(notes_path: Path, cmd: str, window: float) -> None:
+    """Expand each key-note headline into a rich paragraph, grounded in the
+    transcript of its window. Prefers the polished transcript when present."""
+    sid = notes_path.stem.removeprefix("key-notes-")
+    polished = notes_path.parent / f"session-{sid}-polished.md"
+    transcript_path = polished if polished.exists() else notes_path.parent / f"session-{sid}.md"
+    if not transcript_path.exists():
+        sys.exit(f"no transcript found for {notes_path.name} (looked for session-{sid}[-polished].md)")
+    transcript = parse_stamped(transcript_path)
+    headlines = parse_stamped(notes_path)
+    out = notes_path.parent / f"key-notes-enriched-{sid}.md"
+    print(f"Enriching {len(headlines)} notes from {transcript_path.name} …", file=sys.stderr)
+
+    chunks = []
+    for i, (t, headline) in enumerate(headlines):
+        t_end = headlines[i + 1][0] if i + 1 < len(headlines) else t + window
+        excerpt = "\n".join(text for ts, text in transcript if t - 15 <= ts < min(t_end, t + window) + 15)
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, timeout=300,
+            input=ENRICH_PROMPT.format(headline=headline, text=excerpt).encode(),
+        )
+        body = result.stdout.decode().strip() if result.returncode == 0 else ""
+        if not body:
+            body = f"*(enrichment failed: {result.stderr.decode().strip()[-120:]})*"
+        chunks.append(f"## {stamp(t)} {headline}\n\n{body}\n")
+        print(f"\x1b[2K\r[{i + 1}/{len(headlines)}] {headline[:60]}", end="", file=sys.stderr, flush=True)
+        out.write_text("\n".join(chunks))  # flush as we go
+    print(f"\x1b[2K\rEnriched notes: {out}", file=sys.stderr)
 
 
 class NoteTaker:
@@ -300,8 +351,13 @@ def main() -> None:
     parser.add_argument("--notes-cmd", default="claude -p --model haiku", help="Shell command that reads a prompt on stdin and prints the post (default: %(default)s)")
     parser.add_argument("--save-audio", action="store_true", help="Also record the session to a wav next to the transcript (~110 MB/hour), enabling --polish later")
     parser.add_argument("--polish", type=Path, default=None, metavar="AUDIO", help="Re-transcribe a session recording offline with full context (better accuracy) and exit")
+    parser.add_argument("--enrich", type=Path, default=None, metavar="KEYNOTES", help="Expand a key-notes file into rich paragraphs (key-notes-enriched-*.md) using its session transcript, and exit")
     parser.add_argument("--wav", type=Path, default=None, help=argparse.SUPPRESS)  # testing: 16k mono wav instead of mic
     args = parser.parse_args()
+
+    if args.enrich:  # no ASR model needed
+        enrich(args.enrich, args.notes_cmd, args.notes_interval * 1.5)
+        return
 
     print(f"Loading {args.model} …", file=sys.stderr)
     model = from_pretrained(args.model)
