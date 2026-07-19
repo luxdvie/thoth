@@ -31,7 +31,23 @@ STAGING = ROOT / "generated-images"
 GALLERY = ROOT / "gallery"
 PORT = 8511
 STAMP_RE = re.compile(r"^(?:-|##)? ?\[(\d+):(\d\d):(\d\d)\] (.*)$")
-IMAGE_MODEL = os.environ.get("THOTH_IMAGE_MODEL", "gemini-2.5-flash-image")
+MODELS = {  # id -> label shown in the studio picker
+    "gemini-3-pro-image-preview": "Nano Banana Pro · best · ~13¢",
+    "gemini-2.5-flash-image": "Nano Banana · fast · ~4¢",
+}
+IMAGE_MODEL = os.environ.get("THOTH_IMAGE_MODEL", "gemini-3-pro-image-preview")
+NOTES_CMD = os.environ.get("THOTH_NOTES_CMD", "claude -p --model haiku")
+
+ELABORATE_PROMPT = (
+    "You are the art director for an illustrated D&D campaign chronicle. Turn the "
+    "moment below into ONE detailed image-generation prompt: pick the single "
+    "strongest instant of action, then specify composition and camera angle, what "
+    "each named character ({names}) is doing and where they are in frame, "
+    "environment, lighting, weather, and mood. Painterly fantasy illustration "
+    "style. The prompt must say to keep the attached reference characters' faces, "
+    "builds, and gear recognizable, and to render no text or borders. Under 170 "
+    "words. Output only the prompt.\n\nHeadline: {headline}\n\nAccount: {body}"
+)
 
 IMAGE_PROMPT = (
     "Illustrate this moment from a D&D campaign as a single dramatic fantasy scene. "
@@ -92,7 +108,8 @@ def load_state() -> dict:
         for p in sorted(AVATARS.glob("*"))
         if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")
     ]
-    return {"sessions": sessions, "avatars": avatars, "prompt_template": IMAGE_PROMPT, "model": IMAGE_MODEL}
+    return {"sessions": sessions, "avatars": avatars, "prompt_template": IMAGE_PROMPT,
+            "models": MODELS, "model": IMAGE_MODEL}
 
 
 def api_key() -> str:
@@ -107,8 +124,10 @@ def api_key() -> str:
     raise RuntimeError("GEMINI_API_KEY is not set")
 
 
-def gemini_generate(prompt: str, avatar_names: list[str]) -> bytes:
+def gemini_generate(prompt: str, avatar_names: list[str], model: str) -> bytes:
     key = api_key()
+    if model not in MODELS:
+        raise RuntimeError(f"unknown model {model!r}")
     parts = []
     for name in avatar_names:
         matches = [p for p in AVATARS.glob(f"{name}.*") if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")]
@@ -120,7 +139,7 @@ def gemini_generate(prompt: str, avatar_names: list[str]) -> bytes:
     parts.append({"text": prompt})
     body = {"contents": [{"parts": parts}], "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}}
     req = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{IMAGE_MODEL}:generateContent",
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "x-goog-api-key": key},
     )
@@ -186,17 +205,30 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path == "/api/generate":
                 sid, idx = payload["sid"], int(payload["idx"])
+                model = payload.get("model", IMAGE_MODEL)
                 dest_dir = STAGING / sid
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 serial = len(list(dest_dir.glob(f"{idx:03d}-*.png")))
-                png = gemini_generate(payload["prompt"], payload.get("avatars", []))
+                png = gemini_generate(payload["prompt"], payload.get("avatars", []), model)
                 dest = dest_dir / f"{idx:03d}-{serial:02d}.png"
                 dest.write_bytes(png)
                 dest.with_suffix(".json").write_text(json.dumps({
                     "prompt": payload["prompt"], "avatars": payload.get("avatars", []),
                     "headline": payload.get("headline", ""), "stamp": payload.get("stamp", ""),
+                    "model": model,
                 }, indent=2))
                 self._send(200, json.dumps({"url": f"/generated/{sid}/{dest.name}"}).encode())
+            elif self.path == "/api/elaborate":
+                import subprocess
+                prompt = ELABORATE_PROMPT.format(
+                    names=", ".join(payload.get("avatars", [])),
+                    headline=payload.get("headline", ""), body=payload.get("body", "") or "(none)",
+                )
+                r = subprocess.run(NOTES_CMD, shell=True, capture_output=True, timeout=120, input=prompt.encode())
+                text = r.stdout.decode().strip()
+                if r.returncode != 0 or not text:
+                    raise RuntimeError(r.stderr.decode().strip()[-200:] or "elaborator returned nothing")
+                self._send(200, json.dumps({"prompt": text}).encode())
             elif self.path == "/api/promote":
                 sid, idx = payload["sid"], int(payload["idx"])
                 src = (STAGING / sid / Path(payload["file"]).name).resolve()

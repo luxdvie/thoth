@@ -113,7 +113,8 @@ A local curation UI for turning key-notes into illustrated scenes:
 - 📜 Browse every key-note from every session (chronicle text inline), pick one to work on
 - 🧝 Toggle which party members ride along as character references
 - ✍️ Edit the generated prompt before casting it
-- 🖼️ **Conjure** sends it to Gemini's image model (Nano Banana) — every take is kept in gitignored `generated-images/<session>/` with a JSON sidecar of the exact prompt and party used
+- ✨ **Elaborate** asks an art director (the `claude` CLI) to expand the headline into a full brief — composition, camera, lighting, who's doing what — visible and editable before you spend a cent
+- 🖼️ **Conjure** sends it to Nano Banana **Pro** (`gemini-3-pro-image-preview`, ~13¢, ChatGPT-tier) or regular Nano Banana (~4¢) — picker in the UI. Every take is kept in gitignored `generated-images/<session>/` with a JSON sidecar of the exact prompt, party, and model used
 - ✦ **Promote** copies your favorite take into `gallery/<session>/` (the curated record); **Skip** moves on, takes stay in staging
 
 One-time setup:

@@ -43,7 +43,7 @@ mic ─ thoth.py ──► session-<ts>.md  + session-<ts>.wav + key-notes-<ts>.
 
 ## Studio (studio.py + studio.html)
 
-- Endpoints: `GET /api/state` (sessions, notes with enriched bodies, per-note generation history, avatars), `POST /api/generate` (`{sid, idx, stamp, headline, prompt, avatars[]}` → saves png+json sidecar to staging, returns url), `POST /api/promote` (`{…, file}` → copies staging png to `gallery/<sid>/NNN-<stamp>.png`, updates `captions.json`, rebuilds `gallery.md`). Static: `/avatars/`, `/generated/`, `/gallery/`.
+- Endpoints: `GET /api/state` (sessions, notes with enriched bodies, per-note generation history, avatars), `POST /api/generate` (`{sid, idx, stamp, headline, prompt, avatars[]}` → saves png+json sidecar to staging, returns url), `POST /api/elaborate` (`{headline, body, avatars[]}` → art-director prompt via the notes CLI, shown in the textarea for editing), `POST /api/promote` (`{…, file}` → copies staging png to `gallery/<sid>/NNN-<stamp>.png`, updates `captions.json`, rebuilds `gallery.md`). Static: `/avatars/`, `/generated/`, `/gallery/`.
 - Testable headless: start the server, `curl /api/state`, POST a generate with a real key. A generate costs ~$0.04 — one is fine for verification, don't loop.
 - Note identity = (session id, index within its key-notes file). Promotion detection = `NNN-` filename prefix in `gallery/<sid>/`. If key-notes files are ever edited/reordered, indices shift — don't edit them in place.
 - When both `key-notes-<ts>.md` and `key-notes-enriched-<ts>.md` exist, headlines come from the plain file and bodies from the enriched one, joined on timestamp.
@@ -54,7 +54,7 @@ mic ─ thoth.py ──► session-<ts>.md  + session-<ts>.wav + key-notes-<ts>.
 - `add_audio` wants a 1-D `mx.array` at `model.preprocessor_config.sample_rate` (16 kHz). Resample anything else before feeding it.
 - Apple Silicon only (MLX). Don't add cross-platform shims speculatively.
 - Austin's `GEMINI_API_KEY` is a **fish universal variable** — invisible to non-fish parent shells. Both Gemini call sites fall back to `fish -c 'echo -n $GEMINI_API_KEY'`; keep that fallback when touching key handling.
-- The choice of Gemini (`gemini-2.5-flash-image`, "Nano Banana") over gpt-image-1 was deliberate: better multi-reference character consistency, cheaper (~$0.04/image), no org verification. Override with `--image-model` / `THOTH_IMAGE_MODEL`.
+- Image quality lesson: flash-tier Nano Banana underwhelmed Austin vs ChatGPT; the fix was BOTH the Pro model (`gemini-3-pro-image-preview`, studio default, ~13¢/image — flash stays default for batch `--imagine`) AND an elaborate step (short headlines waste a good image model; detailed art-director prompts are half the quality). The choice of Gemini over gpt-image-1 was deliberate: better multi-reference character consistency, cheaper (~$0.04/image), no org verification. Override with `--image-model` / `THOTH_IMAGE_MODEL`.
 
 ## Roadmap (agreed with Austin, in order)
 

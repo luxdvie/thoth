@@ -107,6 +107,19 @@ button.promote{border-color:var(--verdigris); color:var(--verdigris)}
 button.promote:hover{background:var(--verdigris); color:var(--ink)}
 button.skip{border-color:var(--parchment-dim); color:var(--parchment-dim)}
 button.skip:hover{background:var(--parchment-dim); color:var(--ink)}
+select{
+  font-family:"JetBrains Mono",monospace; font-size:11px; letter-spacing:.04em;
+  background:var(--ink3); color:var(--parchment); border:1px solid var(--hairline);
+  padding:11px 12px; cursor:pointer;
+}
+select:focus{outline:none; border-color:var(--gold)}
+.seclabel-row{display:flex; align-items:baseline; gap:14px; max-width:820px}
+.seclabel-row .spacer{flex:1}
+button.mini{
+  font-size:10px; padding:5px 12px; letter-spacing:.12em;
+  border-color:var(--hairline); color:var(--parchment-dim);
+}
+button.mini:hover{border-color:var(--gold); color:var(--gold); background:transparent}
 #status{font-family:"JetBrains Mono",monospace; font-size:11px; color:var(--parchment-dim)}
 #status.err{color:var(--oxblood)}
 #status.busy::after{content:"…"; animation:dots 1.2s steps(4) infinite}
@@ -185,9 +198,14 @@ function renderBench(resetPrompt){
       <div class="avatar ${activeAvatars.has(a.name)?"on":""}" data-n="${esc(a.name)}">
         <img src="${a.url}" alt=""><div class="nm">${esc(a.name)}</div>
       </div>`).join("")}</div>
-    <label class="sec">Incantation — edit freely</label>
+    <div class="seclabel-row">
+      <label class="sec">Incantation — edit freely</label>
+      <span class="spacer"></span>
+      <button id="elaborate" class="mini">✨ Elaborate</button>
+    </div>
     <textarea id="prompt" spellcheck="false"></textarea>
     <div class="actions">
+      <select id="model">${Object.entries(S.models).map(([id,label])=>`<option value="${id}" ${id===pickedModel()?"selected":""}>${esc(label)}</option>`).join("")}</select>
       <button id="gen">Conjure</button>
       <button id="promote" class="promote" ${selGen?"":"disabled"}>Promote ✦</button>
       <button id="skip" class="skip">Skip</button>
@@ -207,9 +225,25 @@ function renderBench(resetPrompt){
   });
   $("#prompt").addEventListener("input",e=>e.target.dataset.touched="1");
   document.querySelectorAll("#strip img").forEach(im=>im.onclick=()=>{selGen=im.dataset.g; renderBench(false);});
+  $("#model").onchange=e=>localStorage.setItem("thoth-model",e.target.value);
+  $("#elaborate").onclick=elaborate;
   $("#gen").onclick=generate;
   $("#promote").onclick=promote;
   $("#skip").onclick=()=>{cur=null; renderNotes(); $("#main").innerHTML=`<div class="empty"><div><span class="ibis">𓅝</span>Skipped. Choose another moment.</div></div>`;};
+}
+function pickedModel(){ return localStorage.getItem("thoth-model")||S.model; }
+async function elaborate(){
+  const st=$("#status"); st.className="busy"; st.textContent="consulting the art director";
+  $("#elaborate").disabled=true;
+  try{
+    const r=await fetch("/api/elaborate",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({headline:cur.note.headline,body:cur.note.body,avatars:[...activeAvatars]})});
+    const j=await r.json();
+    if(j.error) throw new Error(j.error);
+    $("#prompt").value=j.prompt; $("#prompt").dataset.touched="1";
+    st.className=""; st.textContent="incantation elaborated — edit or conjure";
+  }catch(e){ st.className="err"; st.textContent=e.message.slice(0,180); }
+  $("#elaborate").disabled=false;
 }
 async function generate(){
   const st=$("#status"); st.className="busy"; st.textContent="the ibis is painting";
@@ -217,7 +251,7 @@ async function generate(){
   try{
     const r=await fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({sid:cur.sid,idx:cur.idx,stamp:cur.note.stamp,headline:cur.note.headline,
-        prompt:$("#prompt").value,avatars:[...activeAvatars]})});
+        prompt:$("#prompt").value,avatars:[...activeAvatars],model:pickedModel()})});
     const j=await r.json();
     if(j.error) throw new Error(j.error);
     cur.note.generations.push(j.url); selGen=j.url;
