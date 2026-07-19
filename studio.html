@@ -137,6 +137,29 @@ button.mini:hover{border-color:var(--gold); color:var(--gold); background:transp
 }
 #strip img:hover{opacity:1}
 #strip img.sel{border-color:var(--gold); opacity:1}
+
+/* ── narration ── */
+#narr{margin-top:34px; max-width:820px; border-top:1px solid var(--hairline); padding-top:20px}
+#narr textarea{min-height:96px}
+.narr-controls{display:flex; align-items:center; gap:12px; margin:14px 0 8px; flex-wrap:wrap}
+input[type=number]{
+  width:64px; background:var(--ink3); color:var(--parchment); border:1px solid var(--hairline);
+  font-family:"JetBrains Mono",monospace; font-size:11px; padding:10px 8px; text-align:center;
+}
+input[type=number]:focus{outline:none; border-color:var(--gold)}
+.takes{display:flex; flex-direction:column; gap:8px; margin-top:12px}
+.take{
+  display:flex; align-items:center; gap:12px; padding:8px 12px;
+  border:1px solid var(--hairline); cursor:pointer; transition:.15s;
+}
+.take:hover{border-color:var(--gold)}
+.take.sel{border-color:var(--gold); background:rgba(208,169,78,.07)}
+.take .meta{font-family:"JetBrains Mono",monospace; font-size:10.5px; color:var(--parchment-dim); white-space:nowrap}
+.take .meta b{color:var(--gold)}
+.take .meta .over{color:var(--oxblood)}
+.take audio{height:30px; flex:1}
+.wordcount{font-family:"JetBrains Mono",monospace; font-size:10.5px; color:var(--parchment-dim)}
+.wordcount .over{color:var(--oxblood)}
 </style>
 </head>
 <body>
@@ -150,7 +173,15 @@ button.mini:hover{border-color:var(--gold); color:var(--gold); background:transp
   </main>
 </div>
 <script>
-let S=null, cur=null, activeAvatars=new Set(), selGen=null;
+let S=null, cur=null, activeAvatars=new Set(), selGen=null, selNarr=null;
+
+function takeRow(t){
+  const fit=Math.abs(t.duration-t.target)<=2;
+  return `<div class="take ${t.url===selNarr?"sel":""}" data-u="${t.url}">
+    <span class="meta"><b>${esc(t.voice)}</b> · <span class="${fit?"":"over"}">${t.duration}s</span>/${t.target}s</span>
+    <audio controls preload="none" src="${t.url}"></audio>
+  </div>`;
+}
 
 const $=q=>document.querySelector(q);
 const esc=s=>s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -183,6 +214,7 @@ function defaultPrompt(n){
 }
 function select(sid,n){
   cur={sid,idx:n.idx,note:n}; selGen=n.generations.at(-1)||null;
+  selNarr=n.narrations.at(-1)?.url||null;
   renderNotes(); renderBench(true);
 }
 function renderBench(resetPrompt){
@@ -214,6 +246,23 @@ function renderBench(resetPrompt){
     <div id="stage">
       ${selGen?`<img class="hero" src="${selGen}">`:""}
       <div id="strip">${n.generations.map(g=>`<img src="${g}" data-g="${g}" class="${g===selGen?"sel":""}">`).join("")}</div>
+    </div>
+    <div id="narr">
+      <div class="seclabel-row">
+        <label class="sec">Narration${n.narrated?' · <span style="color:var(--verdigris)">promoted 🔊</span>':''}</label>
+        <span class="spacer"></span>
+        <span class="wordcount" id="wc"></span>
+        <button id="draft" class="mini">📜 Draft script</button>
+      </div>
+      <textarea id="script" spellcheck="false" placeholder="Draft a script, or write your own narration here…"></textarea>
+      <div class="narr-controls">
+        <input type="number" id="secs" value="30" min="5" max="180"> <span class="wordcount">sec target</span>
+        <select id="voice">${Object.entries(S.voices).map(([v,d])=>`<option value="${v}">${esc(v)} — ${esc(d)}</option>`).join("")}</select>
+        <button id="narrate">🔊 Narrate</button>
+        <button id="promoteNarr" class="promote" ${selNarr?"":"disabled"}>Promote 🔊</button>
+        <span id="nstatus" class="wordcount"></span>
+      </div>
+      <div class="takes" id="takes">${n.narrations.map(t=>takeRow(t)).join("")}</div>
     </div>`;
   $("#prompt").value=keepPrompt??defaultPrompt(n);
   document.querySelectorAll(".avatar").forEach(el=>el.onclick=()=>{
@@ -228,6 +277,22 @@ function renderBench(resetPrompt){
   $("#model").onchange=e=>localStorage.setItem("thoth-model",e.target.value);
   $("#elaborate").onclick=elaborate;
   $("#gen").onclick=generate;
+  const lastTake=n.narrations.at(-1);
+  if(lastTake) $("#script").value=lastTake.script;
+  const wc=()=>{const w=$("#script").value.trim().split(/\s+/).filter(Boolean).length,
+    budget=Math.round($("#secs").value*95/60);
+    $("#wc").innerHTML=`<span class="${w>budget?"over":""}">${w}</span>/${budget} words`;};
+  $("#script").addEventListener("input",wc); $("#secs").addEventListener("input",wc); wc();
+  $("#draft").onclick=draftScript;
+  $("#narrate").onclick=narrate;
+  $("#promoteNarr").onclick=promoteNarr;
+  document.querySelectorAll(".take").forEach(el=>el.onclick=e=>{
+    if(e.target.tagName==="AUDIO")return;
+    selNarr=el.dataset.u;
+    const t=cur.note.narrations.find(x=>x.url===selNarr);
+    if(t) $("#script").value=t.script;
+    renderBench(false);
+  });
   $("#promote").onclick=promote;
   $("#skip").onclick=()=>{cur=null; renderNotes(); $("#main").innerHTML=`<div class="empty"><div><span class="ibis">𓅝</span>Skipped. Choose another moment.</div></div>`;};
 }
@@ -257,6 +322,42 @@ async function generate(){
     cur.note.generations.push(j.url); selGen=j.url;
     renderBench(false);
   }catch(e){ st.className="err"; st.textContent=e.message.slice(0,180); $("#gen").disabled=false; }
+}
+async function draftScript(){
+  const st=$("#nstatus"); st.textContent="the bard is drafting…";
+  $("#draft").disabled=true;
+  try{
+    const r=await fetch("/api/narrate-script",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({headline:cur.note.headline,body:cur.note.body,seconds:+$("#secs").value})});
+    const j=await r.json();
+    if(j.error) throw new Error(j.error);
+    $("#script").value=j.script; $("#script").dispatchEvent(new Event("input"));
+    st.textContent=`drafted: ${j.words}/${j.budget} words`;
+  }catch(e){ st.innerHTML=`<span class="over">${esc(e.message.slice(0,140))}</span>`; }
+  $("#draft").disabled=false;
+}
+async function narrate(){
+  const st=$("#nstatus"); st.textContent="the narrator clears his throat…";
+  $("#narrate").disabled=true;
+  try{
+    const r=await fetch("/api/narrate",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({sid:cur.sid,idx:cur.idx,stamp:cur.note.stamp,headline:cur.note.headline,
+        script:$("#script").value,voice:$("#voice").value,seconds:+$("#secs").value})});
+    const j=await r.json();
+    if(j.error) throw new Error(j.error);
+    cur.note.narrations.push(j); selNarr=j.url;
+    renderBench(false);
+    $("#nstatus").textContent=`${j.duration}s (target ${j.target}s)`;
+  }catch(e){ st.innerHTML=`<span class="over">${esc(e.message.slice(0,140))}</span>`; $("#narrate").disabled=false; }
+}
+async function promoteNarr(){
+  const st=$("#nstatus"); st.textContent="inscribing…";
+  const r=await fetch("/api/promote-narration",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({sid:cur.sid,idx:cur.idx,stamp:cur.note.stamp,file:selNarr})});
+  const j=await r.json();
+  if(j.error){ st.innerHTML=`<span class="over">${esc(j.error)}</span>`; return; }
+  cur.note.narrated=true; st.textContent="promoted to narration 🔊";
+  renderBench(false);
 }
 async function promote(){
   const st=$("#status"); st.className="busy"; st.textContent="inscribing";

@@ -29,6 +29,8 @@ SESSIONS = ROOT / "sessions"
 AVATARS = ROOT / "avatars"
 STAGING = ROOT / "generated-images"
 GALLERY = ROOT / "gallery"
+AUDIO_STAGING = ROOT / "generated-audio"
+NARRATION = ROOT / "narration"
 PORT = 8511
 STAMP_RE = re.compile(r"^(?:-|##)? ?\[(\d+):(\d\d):(\d\d)\] (.*)$")
 MODELS = {  # id -> label shown in the studio picker
@@ -37,6 +39,69 @@ MODELS = {  # id -> label shown in the studio picker
 }
 IMAGE_MODEL = os.environ.get("THOTH_IMAGE_MODEL", "gemini-3-pro-image-preview")
 NOTES_CMD = os.environ.get("THOTH_NOTES_CMD", "claude -p --model haiku")
+
+TTS_MODEL = os.environ.get("THOTH_TTS_MODEL", "gemini-3.1-flash-tts-preview")
+TTS_RATE = 24000  # Gemini TTS returns s16le mono PCM at 24 kHz
+NARRATION_WPM = 95  # measured across takes: gravitas-style Charon lands 75-102 wpm; 95 centers the spread
+VOICES = {  # prebuilt voice -> flavor shown in the picker
+    "Charon": "deep · grave narrator",
+    "Fenrir": "gravel · storm warning",
+    "Kore": "warm · fireside tale",
+    "Aoede": "bright · bardic",
+    "Puck": "wry · trickster",
+}
+
+SCRIPT_PROMPT = (
+    "You write voiceover narration for an illustrated D&D campaign recap — the "
+    "gravitas of a 'previously on…' cold open. Turn the moment below into a spoken "
+    "narration script of AT MOST {words} words (it must fit {seconds} seconds at a "
+    "slow, dramatic delivery — going over the word budget is a failure). Short "
+    "sentences. Present tense. End on a hook. Keep proper nouns. Output only the "
+    "script, no quotes, no stage directions.\n\n"
+    "Headline: {headline}\n\nAccount: {body}"
+)
+
+NARRATION_STYLE = (
+    "Narrate with measured, dramatic gravitas — a fantasy saga's 'previously on' "
+    "cold open. Deliberate pace, weight on proper nouns, let sentence ends land:\n\n"
+)
+
+
+def gemini_narrate(script: str, voice: str) -> tuple[bytes, float]:
+    """Text → (wav bytes, duration seconds) via Gemini TTS."""
+    if voice not in VOICES:
+        raise RuntimeError(f"unknown voice {voice!r}")
+    body = {
+        "contents": [{"parts": [{"text": NARRATION_STYLE + script}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}},
+        },
+    }
+    req = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{TTS_MODEL}:generateContent",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key()},
+    )
+    err = ""
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                parts = json.load(resp)["candidates"][0]["content"]["parts"]
+                if data := next((p["inlineData"]["data"] for p in parts if "inlineData" in p), None):
+                    pcm = base64.b64decode(data)
+                    import struct
+                    hdr = (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVE"
+                           + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, TTS_RATE, TTS_RATE * 2, 2, 16)
+                           + b"data" + struct.pack("<I", len(pcm)))
+                    return hdr + pcm, len(pcm) / 2 / TTS_RATE
+                err = "model returned no audio part"
+        except Exception as e:
+            err = getattr(e, "read", lambda: b"")()[-300:].decode(errors="replace") or str(e)
+        if attempt == 1:
+            time.sleep(10)
+    raise RuntimeError(err)
+
 
 ELABORATE_PROMPT = (
     "You are the art director for an illustrated D&D campaign chronicle. Turn the "
@@ -102,6 +167,13 @@ def load_state() -> dict:
             n["generations"] = sorted(
                 f"/generated/{sid}/{f.name}" for f in gen_dir.glob(f"{i:03d}-*.png")
             ) if gen_dir.is_dir() else []
+            adir = AUDIO_STAGING / sid
+            n["narrations"] = [
+                {"url": f"/generated-audio/{sid}/{f.name}",
+                 **json.loads(f.with_suffix(".json").read_text())}
+                for f in sorted(adir.glob(f"{i:03d}-*.wav")) if f.with_suffix(".json").exists()
+            ] if adir.is_dir() else []
+            n["narrated"] = bool(list((NARRATION / sid).glob(f"{i:03d}-*.wav"))) if (NARRATION / sid).is_dir() else False
         sessions.append({"sid": sid, "notes": notes})
     avatars = [
         {"name": p.stem, "url": f"/avatars/{p.name}"}
@@ -109,7 +181,7 @@ def load_state() -> dict:
         if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")
     ]
     return {"sessions": sessions, "avatars": avatars, "prompt_template": IMAGE_PROMPT,
-            "models": MODELS, "model": IMAGE_MODEL}
+            "models": MODELS, "model": IMAGE_MODEL, "voices": VOICES}
 
 
 def api_key() -> str:
@@ -195,6 +267,10 @@ class Handler(BaseHTTPRequestHandler):
             self._static(AVATARS, self.path.removeprefix("/avatars/"), "image/png")
         elif self.path.startswith("/generated/"):
             self._static(STAGING, self.path.removeprefix("/generated/"), "image/png")
+        elif self.path.startswith("/generated-audio/"):
+            self._static(AUDIO_STAGING, self.path.removeprefix("/generated-audio/"), "audio/wav")
+        elif self.path.startswith("/narration/"):
+            self._static(NARRATION, self.path.removeprefix("/narration/"), "audio/wav")
         elif self.path.startswith("/gallery/"):
             self._static(GALLERY, self.path.removeprefix("/gallery/"), "image/png")
         else:
@@ -218,6 +294,43 @@ class Handler(BaseHTTPRequestHandler):
                     "model": model,
                 }, indent=2))
                 self._send(200, json.dumps({"url": f"/generated/{sid}/{dest.name}"}).encode())
+            elif self.path == "/api/narrate-script":
+                import subprocess
+                seconds = float(payload.get("seconds", 30))
+                words = int(seconds * NARRATION_WPM / 60)
+                prompt = SCRIPT_PROMPT.format(
+                    words=words, seconds=int(seconds),
+                    headline=payload.get("headline", ""), body=payload.get("body", "") or "(none)",
+                )
+                r = subprocess.run(NOTES_CMD, shell=True, capture_output=True, timeout=120, input=prompt.encode())
+                text = r.stdout.decode().strip()
+                if r.returncode != 0 or not text:
+                    raise RuntimeError(r.stderr.decode().strip()[-200:] or "scriptwriter returned nothing")
+                self._send(200, json.dumps({"script": text, "words": len(text.split()), "budget": words}).encode())
+            elif self.path == "/api/narrate":
+                sid, idx = payload["sid"], int(payload["idx"])
+                dest_dir = AUDIO_STAGING / sid
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                serial = len(list(dest_dir.glob(f"{idx:03d}-*.wav")))
+                wav, duration = gemini_narrate(payload["script"], payload.get("voice", "Charon"))
+                dest = dest_dir / f"{idx:03d}-{serial:02d}.wav"
+                dest.write_bytes(wav)
+                meta = {"script": payload["script"], "voice": payload.get("voice", "Charon"),
+                        "duration": round(duration, 2), "target": payload.get("seconds", 30),
+                        "headline": payload.get("headline", ""), "stamp": payload.get("stamp", ""),
+                        "model": TTS_MODEL}
+                dest.with_suffix(".json").write_text(json.dumps(meta, indent=2))
+                self._send(200, json.dumps({"url": f"/generated-audio/{sid}/{dest.name}", **meta}).encode())
+            elif self.path == "/api/promote-narration":
+                sid, idx = payload["sid"], int(payload["idx"])
+                src = (AUDIO_STAGING / sid / Path(payload["file"]).name).resolve()
+                assert src.is_relative_to(AUDIO_STAGING) and src.is_file()
+                ndir = NARRATION / sid
+                ndir.mkdir(parents=True, exist_ok=True)
+                dest = ndir / f"{idx:03d}-{payload.get('stamp', '').strip('[]').replace(':', '-')}.wav"
+                shutil.copy2(src, dest)
+                shutil.copy2(src.with_suffix(".json"), dest.with_suffix(".json"))
+                self._send(200, json.dumps({"promoted": f"/narration/{sid}/{dest.name}"}).encode())
             elif self.path == "/api/elaborate":
                 import subprocess
                 prompt = ELABORATE_PROMPT.format(

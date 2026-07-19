@@ -47,6 +47,7 @@ mic ─ thoth.py ──► session-<ts>.md  + session-<ts>.wav + key-notes-<ts>.
 - Testable headless: start the server, `curl /api/state`, POST a generate with a real key. A generate costs ~$0.04 — one is fine for verification, don't loop.
 - Note identity = (session id, index within its key-notes file). Promotion detection = `NNN-` filename prefix in `gallery/<sid>/`. If key-notes files are ever edited/reordered, indices shift — don't edit them in place.
 - When both `key-notes-<ts>.md` and `key-notes-enriched-<ts>.md` exist, headlines come from the plain file and bodies from the enriched one, joined on timestamp.
+- **Narration:** `POST /api/narrate-script` ({headline, body, seconds} → word-budgeted script via notes CLI), `POST /api/narrate` ({…, script, voice} → Gemini TTS `gemini-3.1-flash-tts-preview`, returns 24 kHz wav to `generated-audio/<sid>/` + sidecar with measured duration), `POST /api/promote-narration` → `narration/<sid>/`. TTS returns raw s16le PCM — the wav header is built by hand; duration = pcm_bytes/2/24000. NARRATION_WPM=95 is *measured* (gravitas style runs 75–102 wpm, take-dependent — do not "fix" it back to 150); exact video fit is ffmpeg `atempo`'s job at assembly, not the TTS call's.
 
 ## Constraints learned the hard way
 
