@@ -202,6 +202,11 @@ def imagine(notes_path: Path, avatars_dir: Path, model: str, post_cmd: str | Non
     """Generate one scene image per key-note via the Gemini image API, using the
     avatar images as character references. Images land in gallery/<session>/."""
     key = os.environ.get("GEMINI_API_KEY")
+    if not key:  # fish universal vars aren't exported to non-fish parents
+        try:
+            key = subprocess.run(["fish", "-c", "echo -n $GEMINI_API_KEY"], capture_output=True, timeout=5).stdout.decode().strip()
+        except Exception:
+            pass
     if not key:
         sys.exit("GEMINI_API_KEY is not set (create one at https://aistudio.google.com/apikey)")
     avatars = sorted(p for p in avatars_dir.glob("*") if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
