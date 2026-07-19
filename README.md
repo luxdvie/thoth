@@ -42,6 +42,7 @@ Four hours of table time becomes a searchable, timestamped campaign log. Feed it
 | `--notes-cmd CMD` | Summarizer command, prompt on stdin → post on stdout (default `claude -p --model haiku`) |
 | `--save-audio` | Also record the session to a `.wav` next to the transcript (~110 MB/hour) |
 | `--polish AUDIO` | Re-transcribe a recording offline with full context — noticeably more accurate than the live pass |
+| `--enrich KEYNOTES` | Expand a key-notes file into a rich chronicle (`key-notes-enriched-*.md`), grounded in the transcript |
 | `--speakers` | Enable experimental speaker labeling (downloads 40 MB TitaNet model) |
 | `--speaker-threshold X` | Same-speaker similarity floor (default `0.45`) |
 | `--max-speakers N` | Hard cap on distinct speakers (default `8`) — set it to your table size |
@@ -68,6 +69,24 @@ The polished pass re-reads the whole recording with full context — same model,
 ```
 
 Summaries run on a background thread — the transcription loop never blocks. The default summarizer is the `claude` CLI (Haiku), but `--notes-cmd` accepts any shell command that reads a prompt on stdin and prints a line: a local model via `ollama run`, or someday a script that posts straight to a stream overlay or social feed.
+
+## 📚 The full ritual
+
+A session leaves a family of artifacts, each derived from the last:
+
+```
+session-<ts>.md              live transcript        (always)
+session-<ts>.wav             recording              (--save-audio)
+key-notes-<ts>.md            headline feed          (--notes)
+session-<ts>-polished.md     full-context re-pass   (--polish <wav>)
+key-notes-enriched-<ts>.md   vivid chronicle        (--enrich <key-notes>)
+```
+
+Stopped and restarted mid-session? `aggregate.py` stitches the parts into `campaign-*` files:
+
+```sh
+uv run aggregate.py sessions campaign-2026-07-18
+```
 
 ## 🧱 What it is (and isn't)
 
