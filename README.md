@@ -84,7 +84,7 @@ key-notes-<ts>.md            headline feed          (--notes)
 session-<ts>-polished.md     full-context re-pass   (--polish <wav>)
 key-notes-enriched-<ts>.md   vivid chronicle        (--enrich <key-notes>)
 gallery/<ts>/*.png           illustrated scenes     (--imagine <key-notes>)
-narration/<ts>/*.wav         promoted voiceovers    (studio 🔊)
+cutscenes/<ts>/<span>/       narration.wav + keyframe manifest (studio 🎬)
 ```
 
 Drop your party's character portraits in `avatars/` (one image per character, named after them) and `--imagine` paints each key-note with the party in it. Runs are resumable — existing scenes are skipped, so a failed run just continues.
@@ -117,7 +117,7 @@ A local curation UI for turning key-notes into illustrated scenes:
 - ✨ **Elaborate** asks an art director (the `claude` CLI) to expand the headline into a full brief — composition, camera, lighting, who's doing what — visible and editable before you spend a cent
 - 🖼️ **Conjure** sends it to Nano Banana **Pro** (`gemini-3-pro-image-preview`, ~13¢, ChatGPT-tier) or regular Nano Banana (~4¢) — picker in the UI. Every take is kept in gitignored `generated-images/<session>/` with a JSON sidecar of the exact prompt, party, and model used
 - ✦ **Promote** copies your favorite take into `gallery/<session>/` (the curated record); **Skip** moves on, takes stay in staging
-- 🔊 **Narration** — set a target length (e.g. 30 s), **Draft script** writes a "previously on…"-style voiceover to a word budget, pick a voice (Charon the grave narrator, Fenrir, Kore, Aoede, Puck), **Narrate** renders it via Gemini TTS (~1¢), every take lands in gitignored `generated-audio/<session>/` with its script and measured duration, and **Promote 🔊** copies the keeper to `narration/<session>/`
+- 🎬 **Cutscenes mode** — the second tab. A cutscene is an *arc*, not a moment: click a start note and an end note, and the studio shows the promoted keyframes inside that span (with a 6-frame target for the ComfyUI template) and a recap-narration workbench. **Draft recap** weaves the span's chronicle entries into one "previously on…" story at a word budget, pick a voice (Charon the grave narrator, Fenrir, Kore, Aoede, Puck), **Narrate** renders it via Gemini TTS (~1¢/take) into gitignored `generated-audio/<session>/`, and **Promote 🎬** writes `cutscenes/<session>/<span>/` — `narration.wav` plus a `manifest.json` listing keyframes, script, voice, and duration: everything video assembly needs
 
 **How narration length works**: duration = word count ÷ speaking pace, and pace is a *property of the delivery*, not a setting — the dramatic style runs 75–102 wpm across takes (vs ~150 for plain speech). So the studio budgets words for your target (30 s ≈ 48 words), shows each take's measured duration against target, and the last ±10% is snapped exactly at video-assembly time with `ffmpeg -af atempo` (imperceptible). Aim a hair under; padding silence is free, cutting isn't.
 

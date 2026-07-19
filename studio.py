@@ -30,7 +30,7 @@ AVATARS = ROOT / "avatars"
 STAGING = ROOT / "generated-images"
 GALLERY = ROOT / "gallery"
 AUDIO_STAGING = ROOT / "generated-audio"
-NARRATION = ROOT / "narration"
+CUTSCENES = ROOT / "cutscenes"
 PORT = 8511
 STAMP_RE = re.compile(r"^(?:-|##)? ?\[(\d+):(\d\d):(\d\d)\] (.*)$")
 MODELS = {  # id -> label shown in the studio picker
@@ -51,14 +51,15 @@ VOICES = {  # prebuilt voice -> flavor shown in the picker
     "Puck": "wry · trickster",
 }
 
-SCRIPT_PROMPT = (
+RECAP_PROMPT = (
     "You write voiceover narration for an illustrated D&D campaign recap — the "
-    "gravitas of a 'previously on…' cold open. Turn the moment below into a spoken "
-    "narration script of AT MOST {words} words (it must fit {seconds} seconds at a "
-    "slow, dramatic delivery — going over the word budget is a failure). Short "
-    "sentences. Present tense. End on a hook. Keep proper nouns. Output only the "
-    "script, no quotes, no stage directions.\n\n"
-    "Headline: {headline}\n\nAccount: {body}"
+    "gravitas of a 'previously on…' cold open. Below are chronicle entries covering "
+    "a stretch of the session, in order. Weave them into ONE spoken recap with an "
+    "arc: where things stood, what changed, where it leaves the party. Not a list — "
+    "a story. AT MOST {words} words (it must fit {seconds} seconds at a slow, "
+    "dramatic delivery — going over the word budget is a failure). Short sentences. "
+    "Present tense. End on a hook. Keep proper nouns. Output only the script, no "
+    "quotes, no stage directions.\n\n{entries}"
 )
 
 NARRATION_STYLE = (
@@ -158,23 +159,39 @@ def load_state() -> dict:
             notes = parse_notes(plain)
             for n in notes:
                 n["body"] = bodies.get(n["t"], "")
-        promoted = {f.name.split("-")[0] for f in (GALLERY / sid).glob("*.png")} if (GALLERY / sid).is_dir() else set()
+        gdir = GALLERY / sid
+        promoted_by_idx: dict[str, list[str]] = {}
+        if gdir.is_dir():
+            for f in sorted(gdir.glob("*.png")):
+                promoted_by_idx.setdefault(f.name.split("-")[0], []).append(f"/gallery/{sid}/{f.name}")
         for i, n in enumerate(notes):
             n["idx"] = i
             n["stamp"] = stamp(n["t"])
-            n["promoted"] = f"{i:03d}" in promoted
+            n["gallery"] = promoted_by_idx.get(f"{i:03d}", [])
+            n["promoted"] = bool(n["gallery"])
             gen_dir = STAGING / sid
             n["generations"] = sorted(
                 f"/generated/{sid}/{f.name}" for f in gen_dir.glob(f"{i:03d}-*.png")
             ) if gen_dir.is_dir() else []
-            adir = AUDIO_STAGING / sid
-            n["narrations"] = [
-                {"url": f"/generated-audio/{sid}/{f.name}",
-                 **json.loads(f.with_suffix(".json").read_text())}
-                for f in sorted(adir.glob(f"{i:03d}-*.wav")) if f.with_suffix(".json").exists()
-            ] if adir.is_dir() else []
-            n["narrated"] = bool(list((NARRATION / sid).glob(f"{i:03d}-*.wav"))) if (NARRATION / sid).is_dir() else False
-        sessions.append({"sid": sid, "notes": notes})
+        # cutscene narration takes (staged) and promoted cutscenes
+        cuts: dict[str, dict] = {}
+        adir = AUDIO_STAGING / sid
+        if adir.is_dir():
+            for f in sorted(adir.glob("cut-*.wav")):
+                if not f.with_suffix(".json").exists():
+                    continue
+                span = "-".join(f.stem.split("-")[1:3])
+                cuts.setdefault(span, {"span": span, "takes": [], "promoted": None})["takes"].append(
+                    {"url": f"/generated-audio/{sid}/{f.name}", **json.loads(f.with_suffix(".json").read_text())}
+                )
+        cdir = CUTSCENES / sid
+        if cdir.is_dir():
+            for m in sorted(cdir.glob("*/manifest.json")):
+                span = m.parent.name
+                cuts.setdefault(span, {"span": span, "takes": [], "promoted": None})["promoted"] = {
+                    "url": f"/cutscenes/{sid}/{span}/narration.wav", **json.loads(m.read_text())
+                }
+        sessions.append({"sid": sid, "notes": notes, "cuts": sorted(cuts.values(), key=lambda c: c["span"])})
     avatars = [
         {"name": p.stem, "url": f"/avatars/{p.name}"}
         for p in sorted(AVATARS.glob("*"))
@@ -269,8 +286,8 @@ class Handler(BaseHTTPRequestHandler):
             self._static(STAGING, self.path.removeprefix("/generated/"), "image/png")
         elif self.path.startswith("/generated-audio/"):
             self._static(AUDIO_STAGING, self.path.removeprefix("/generated-audio/"), "audio/wav")
-        elif self.path.startswith("/narration/"):
-            self._static(NARRATION, self.path.removeprefix("/narration/"), "audio/wav")
+        elif self.path.startswith("/cutscenes/"):
+            self._static(CUTSCENES, self.path.removeprefix("/cutscenes/"), "audio/wav")
         elif self.path.startswith("/gallery/"):
             self._static(GALLERY, self.path.removeprefix("/gallery/"), "image/png")
         else:
@@ -294,43 +311,47 @@ class Handler(BaseHTTPRequestHandler):
                     "model": model,
                 }, indent=2))
                 self._send(200, json.dumps({"url": f"/generated/{sid}/{dest.name}"}).encode())
-            elif self.path == "/api/narrate-script":
+            elif self.path == "/api/cutscene-script":
                 import subprocess
                 seconds = float(payload.get("seconds", 30))
                 words = int(seconds * NARRATION_WPM / 60)
-                prompt = SCRIPT_PROMPT.format(
-                    words=words, seconds=int(seconds),
-                    headline=payload.get("headline", ""), body=payload.get("body", "") or "(none)",
+                entries = "\n\n".join(
+                    f"{e['stamp']} {e['headline']}\n{e.get('body', '')}".strip()
+                    for e in payload.get("entries", [])
                 )
+                prompt = RECAP_PROMPT.format(words=words, seconds=int(seconds), entries=entries)
                 r = subprocess.run(NOTES_CMD, shell=True, capture_output=True, timeout=120, input=prompt.encode())
                 text = r.stdout.decode().strip()
                 if r.returncode != 0 or not text:
                     raise RuntimeError(r.stderr.decode().strip()[-200:] or "scriptwriter returned nothing")
                 self._send(200, json.dumps({"script": text, "words": len(text.split()), "budget": words}).encode())
             elif self.path == "/api/narrate":
-                sid, idx = payload["sid"], int(payload["idx"])
+                sid, span = payload["sid"], payload["span"]  # e.g. "003-008"
+                assert re.fullmatch(r"\d{3}-\d{3}", span)
                 dest_dir = AUDIO_STAGING / sid
                 dest_dir.mkdir(parents=True, exist_ok=True)
-                serial = len(list(dest_dir.glob(f"{idx:03d}-*.wav")))
+                serial = len(list(dest_dir.glob(f"cut-{span}-*.wav")))
                 wav, duration = gemini_narrate(payload["script"], payload.get("voice", "Charon"))
-                dest = dest_dir / f"{idx:03d}-{serial:02d}.wav"
+                dest = dest_dir / f"cut-{span}-{serial:02d}.wav"
                 dest.write_bytes(wav)
                 meta = {"script": payload["script"], "voice": payload.get("voice", "Charon"),
                         "duration": round(duration, 2), "target": payload.get("seconds", 30),
-                        "headline": payload.get("headline", ""), "stamp": payload.get("stamp", ""),
-                        "model": TTS_MODEL}
+                        "span": span, "model": TTS_MODEL}
                 dest.with_suffix(".json").write_text(json.dumps(meta, indent=2))
                 self._send(200, json.dumps({"url": f"/generated-audio/{sid}/{dest.name}", **meta}).encode())
-            elif self.path == "/api/promote-narration":
-                sid, idx = payload["sid"], int(payload["idx"])
+            elif self.path == "/api/promote-cutscene":
+                sid, span = payload["sid"], payload["span"]
+                assert re.fullmatch(r"\d{3}-\d{3}", span)
                 src = (AUDIO_STAGING / sid / Path(payload["file"]).name).resolve()
                 assert src.is_relative_to(AUDIO_STAGING) and src.is_file()
-                ndir = NARRATION / sid
-                ndir.mkdir(parents=True, exist_ok=True)
-                dest = ndir / f"{idx:03d}-{payload.get('stamp', '').strip('[]').replace(':', '-')}.wav"
-                shutil.copy2(src, dest)
-                shutil.copy2(src.with_suffix(".json"), dest.with_suffix(".json"))
-                self._send(200, json.dumps({"promoted": f"/narration/{sid}/{dest.name}"}).encode())
+                cdir = CUTSCENES / sid / span
+                cdir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, cdir / "narration.wav")
+                meta = json.loads(src.with_suffix(".json").read_text())
+                meta["keyframes"] = payload.get("keyframes", [])  # promoted gallery paths in span, at promote time
+                meta["stamps"] = payload.get("stamps", [])
+                (cdir / "manifest.json").write_text(json.dumps(meta, indent=2))
+                self._send(200, json.dumps({"promoted": f"/cutscenes/{sid}/{span}/narration.wav"}).encode())
             elif self.path == "/api/elaborate":
                 import subprocess
                 prompt = ELABORATE_PROMPT.format(
