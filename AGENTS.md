@@ -1,6 +1,30 @@
 # thoth — agent notes
 
-Realtime local speech-to-text for tabletop sessions. One file of product code: `thoth.py`. Keep it that way unless a feature genuinely can't live there.
+Realtime local speech-to-text for tabletop (D&D) sessions, plus a storytelling pipeline on top: headlines → chronicle → illustrated scenes → (roadmap) session films.
+
+## Repo map
+
+```
+thoth.py         core CLI: live transcribe / --polish / --enrich / --imagine (PEP 723, one file — keep it that way)
+studio.py        stdlib-only HTTP server (:8511) for the curation UI; deliberately zero-dep so it starts instantly
+studio.html      the UI (single page, scriptorium-noir; Cinzel/Cormorant/JetBrains Mono via Google Fonts)
+aggregate.py     stitches multi-part sessions into campaign-* files (md concat with part headers, wav concat)
+sessions/        (gitignored) transcripts, recordings, key-notes, chronicles — per-session timestamp ids
+avatars/         (gitignored) party reference portraits; filename stem = character name used in prompts
+generated-images/(gitignored) every studio/imagine take + JSON sidecar (prompt, avatars, headline)
+gallery/         (gitignored) PROMOTED scenes only + captions.json + gallery.md — the curated record
+```
+
+`thoth.py` stays one file. The studio is a separate surface (server + page) on purpose; it duplicates the small Gemini REST call from `thoth.py` rather than importing it, because importing `thoth` would drag in mlx/parakeet and add seconds to server startup. If you change one Gemini call, change both.
+
+## Data flow
+
+```
+mic ─ thoth.py ──► session-<ts>.md  + session-<ts>.wav + key-notes-<ts>.md      (live)
+      --polish <wav>  ──► session-<ts>-polished.md                              (accuracy pass)
+      --enrich <keynotes> ──► key-notes-enriched-<ts>.md                        (chronicle)
+      --imagine <keynotes> / studio.py ──► generated-images/<ts>/ ──promote──► gallery/<ts>/
+```
 
 ## Architecture
 
@@ -17,11 +41,26 @@ Realtime local speech-to-text for tabletop sessions. One file of product code: `
 
 - **Imagine layer (`--imagine`):** one Gemini `generateContent` REST call per key-note (no SDK dep — stdlib urllib), avatar images inlined base64 as character references, `responseModalities: ["TEXT","IMAGE"]`. Gallery writes are resumable (existing files skipped) and `gallery.md` re-renders after every image. `--post-cmd` is the future social/API hook: `<path>\n<caption>` on stdin, same stdin→stdout contract as `--notes-cmd`. `avatars/` and `gallery/` are gitignored — personal content.
 
+## Studio (studio.py + studio.html)
+
+- Endpoints: `GET /api/state` (sessions, notes with enriched bodies, per-note generation history, avatars), `POST /api/generate` (`{sid, idx, stamp, headline, prompt, avatars[]}` → saves png+json sidecar to staging, returns url), `POST /api/promote` (`{…, file}` → copies staging png to `gallery/<sid>/NNN-<stamp>.png`, updates `captions.json`, rebuilds `gallery.md`). Static: `/avatars/`, `/generated/`, `/gallery/`.
+- Testable headless: start the server, `curl /api/state`, POST a generate with a real key. A generate costs ~$0.04 — one is fine for verification, don't loop.
+- Note identity = (session id, index within its key-notes file). Promotion detection = `NNN-` filename prefix in `gallery/<sid>/`. If key-notes files are ever edited/reordered, indices shift — don't edit them in place.
+- When both `key-notes-<ts>.md` and `key-notes-enriched-<ts>.md` exist, headlines come from the plain file and bodies from the enriched one, joined on timestamp.
+
 ## Constraints learned the hard way
 
 - Keep the `numba>=0.60` pin. Without it uv's resolver picks numba 0.53 (via librosa), which cannot build on modern Python.
 - `add_audio` wants a 1-D `mx.array` at `model.preprocessor_config.sample_rate` (16 kHz). Resample anything else before feeding it.
 - Apple Silicon only (MLX). Don't add cross-platform shims speculatively.
+- Austin's `GEMINI_API_KEY` is a **fish universal variable** — invisible to non-fish parent shells. Both Gemini call sites fall back to `fish -c 'echo -n $GEMINI_API_KEY'`; keep that fallback when touching key handling.
+- The choice of Gemini (`gemini-2.5-flash-image`, "Nano Banana") over gpt-image-1 was deliberate: better multi-reference character consistency, cheaper (~$0.04/image), no org verification. Override with `--image-model` / `THOTH_IMAGE_MODEL`.
+
+## Roadmap (agreed with Austin, in order)
+
+1. **Session films**: 6 promoted gallery scenes → ComfyUI keyframe template (https://comfy.org/workflows/templates-6-key-frames-920c6926e747/) per clip → `ffmpeg concat` of clips. Images are the hard currency; video comes after.
+2. **Posting hooks**: `--post-cmd` / `--notes-cmd` are stdin→stdout shell contracts, currently noop — wire to a social API or stream overlay without touching core code.
+3. **Diarization v2**: calibration phase (each player says a line at session start), stronger embedding model; `--speakers` is opt-in experimental until then.
 
 ## Testing without a microphone
 

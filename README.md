@@ -4,7 +4,7 @@
 
 **Realtime, fully-local transcription for tabletop sessions.** Mic → live terminal text → timestamped markdown on disk. Runs [NVIDIA Parakeet](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v2) on your Mac's Neural Engine via [MLX](https://github.com/ml-explore/mlx).
 
-🔒 **No cloud. No API keys. No subscription.** Your table talk never leaves the machine.
+🔒 **Transcription is fully local** — no cloud, no keys, your table talk never leaves the machine. The optional storytelling layers ([notes](#-live-session-feed), [chronicle](#-the-full-ritual), [illustration](#-scene-studio)) call out to LLM/image APIs of your choosing.
 
 ```
 [0:00:01] The party enters the dungeon.
@@ -17,7 +17,8 @@
 ## ⚡ Quickstart
 
 ```sh
-uv run thoth.py
+uv run thoth.py                          # bare: live transcript only
+uv run thoth.py --save-audio --notes     # the full game-night loadout
 ```
 
 That's it. First run pulls the model (~600 MB), then you're live:
@@ -93,9 +94,50 @@ Stopped and restarted mid-session? `aggregate.py` stitches the parts into `campa
 uv run aggregate.py sessions campaign-2026-07-18
 ```
 
+The full post-session ritual, in order:
+
+```sh
+uv run thoth.py --polish sessions/session-<ts>.wav       # 1. accurate transcript
+uv run thoth.py --enrich sessions/key-notes-<ts>.md      # 2. vivid chronicle
+uv run studio.py                                         # 3. illustrate & curate
+```
+
+## 🎨 Scene studio
+
+```sh
+uv run studio.py        # → http://localhost:8511
+```
+
+A local curation UI for turning key-notes into illustrated scenes:
+
+- 📜 Browse every key-note from every session (chronicle text inline), pick one to work on
+- 🧝 Toggle which party members ride along as character references
+- ✍️ Edit the generated prompt before casting it
+- 🖼️ **Conjure** sends it to Gemini's image model (Nano Banana) — every take is kept in gitignored `generated-images/<session>/` with a JSON sidecar of the exact prompt and party used
+- ✦ **Promote** copies your favorite take into `gallery/<session>/` (the curated record); **Skip** moves on, takes stay in staging
+
+One-time setup:
+
+1. API key: [aistudio.google.com/apikey](https://aistudio.google.com/apikey) → `set -Ux GEMINI_API_KEY "…"` (fish) or export it in your shell
+2. Party portraits: one image per character in `avatars/`, filename = character name (`corvus.png` → "Corvus" in prompts)
+
+For unattended batch generation of a whole session, `uv run thoth.py --imagine sessions/key-notes-<ts>.md` does the same thing without the curation step.
+
+## 🗺️ Roadmap
+
+- 🎬 **Session films** — feed 6 promoted gallery scenes into a [ComfyUI keyframe workflow](https://comfy.org/workflows/templates-6-key-frames-920c6926e747/) per clip, `ffmpeg concat` the clips into a session film
+- 📡 **Posting hooks** — `--post-cmd` (images) and `--notes-cmd` (headlines) are stdin→stdout shell contracts; point them at a social API or stream overlay when the time comes
+- 🎭 **Better diarization** — calibration phase (each player says a line at session start), stronger embedding models
+
 ## 🧱 What it is (and isn't)
 
-One file. ~250 lines. PEP 723 inline deps — no venv, no pyproject, no build step. `uv` handles everything.
+Three small PEP 723 scripts — no venv, no pyproject, no build step; `uv` handles everything:
+
+| File | Role |
+|------|------|
+| `thoth.py` | The scribe: transcribe, record, polish, notes, enrich, batch-imagine |
+| `studio.py` + `studio.html` | The atelier: local web UI for curated scene generation |
+| `aggregate.py` | The binder: stitch multi-part sessions into `campaign-*` files |
 
 - 🍎 Apple Silicon only (MLX)
 - 🗣️ Speaker ID is per-sentence clustering, not full diarization — two people talking over each other land in one line, and very similar voices may merge (tune `--speaker-threshold`)
