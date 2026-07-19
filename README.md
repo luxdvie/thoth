@@ -43,6 +43,8 @@ Four hours of table time becomes a searchable, timestamped campaign log. Feed it
 | `--save-audio` | Also record the session to a `.wav` next to the transcript (~110 MB/hour) |
 | `--polish AUDIO` | Re-transcribe a recording offline with full context — noticeably more accurate than the live pass |
 | `--enrich KEYNOTES` | Expand a key-notes file into a rich chronicle (`key-notes-enriched-*.md`), grounded in the transcript |
+| `--imagine KEYNOTES` | 🎨 Generate a scene image per key-note into `gallery/<session>/`, with `avatars/` as character references (Gemini, needs `GEMINI_API_KEY`) |
+| `--post-cmd CMD` | Hook run per generated image (`<path>\n<caption>` on stdin) — wire it to a poster later |
 | `--speakers` | Enable experimental speaker labeling (downloads 40 MB TitaNet model) |
 | `--speaker-threshold X` | Same-speaker similarity floor (default `0.45`) |
 | `--max-speakers N` | Hard cap on distinct speakers (default `8`) — set it to your table size |
@@ -80,7 +82,10 @@ session-<ts>.wav             recording              (--save-audio)
 key-notes-<ts>.md            headline feed          (--notes)
 session-<ts>-polished.md     full-context re-pass   (--polish <wav>)
 key-notes-enriched-<ts>.md   vivid chronicle        (--enrich <key-notes>)
+gallery/<ts>/*.png           illustrated scenes     (--imagine <key-notes>)
 ```
+
+Drop your party's character portraits in `avatars/` (one image per character, named after them) and `--imagine` paints each key-note with the party in it. Runs are resumable — existing scenes are skipped, so a failed run just continues.
 
 Stopped and restarted mid-session? `aggregate.py` stitches the parts into `campaign-*` files:
 

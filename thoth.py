@@ -17,7 +17,10 @@ Usage:
 """
 
 import argparse
+import base64
 import datetime
+import json
+import os
 import queue
 import re
 import shutil
@@ -145,7 +148,7 @@ ENRICH_PROMPT = (
     "Write in past tense. Output only the account, no headline, no quotes.\n\n"
     "Headline: {headline}\n\nTranscript:\n{text}"
 )
-STAMP_RE = re.compile(r"^-? ?\[(\d+):(\d\d):(\d\d)\] (.*)$")
+STAMP_RE = re.compile(r"^(?:-|##)? ?\[(\d+):(\d\d):(\d\d)\] (.*)$")
 
 
 def parse_stamped(path: Path) -> list[tuple[float, str]]:
@@ -185,6 +188,82 @@ def enrich(notes_path: Path, cmd: str, window: float) -> None:
         print(f"\x1b[2K\r[{i + 1}/{len(headlines)}] {headline[:60]}", end="", file=sys.stderr, flush=True)
         out.write_text("\n".join(chunks))  # flush as we go
     print(f"\x1b[2K\rEnriched notes: {out}", file=sys.stderr)
+
+
+IMAGE_PROMPT = (
+    "Illustrate this moment from a D&D campaign as a single dramatic fantasy scene. "
+    "The attached reference images are the party's characters ({names}) — keep their "
+    "faces, builds, and gear recognizable. Cinematic lighting, painterly fantasy "
+    "illustration style, no text or borders in the image.\n\nScene: {scene}"
+)
+
+
+def imagine(notes_path: Path, avatars_dir: Path, model: str, post_cmd: str | None) -> None:
+    """Generate one scene image per key-note via the Gemini image API, using the
+    avatar images as character references. Images land in gallery/<session>/."""
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        sys.exit("GEMINI_API_KEY is not set (create one at https://aistudio.google.com/apikey)")
+    avatars = sorted(p for p in avatars_dir.glob("*") if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
+    if not avatars:
+        sys.exit(f"no avatar images found in {avatars_dir}/")
+    names = ", ".join(p.stem for p in avatars)
+    avatar_parts = [
+        {"inline_data": {
+            "mime_type": "image/jpeg" if p.suffix.lower() in (".jpg", ".jpeg") else f"image/{p.suffix.lower().lstrip('.')}",
+            "data": base64.b64encode(p.read_bytes()).decode(),
+        }}
+        for p in avatars
+    ]
+
+    sid = notes_path.stem.removeprefix("key-notes-enriched-").removeprefix("key-notes-")
+    notes = parse_stamped(notes_path)
+    gallery = Path("gallery") / sid
+    gallery.mkdir(parents=True, exist_ok=True)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    print(f"Imagining {len(notes)} scenes with {len(avatars)} character references → {gallery}/", file=sys.stderr)
+
+    captions = []
+    for i, (t, headline) in enumerate(notes):
+        dest = gallery / f"{i:03d}-{stamp(t).strip('[]').replace(':', '-')}.png"
+        if dest.exists():  # resumable: rerun skips finished scenes
+            captions.append((dest, t, headline))
+            continue
+        body = {
+            "contents": [{"parts": avatar_parts + [
+                {"text": IMAGE_PROMPT.format(names=names, scene=headline)}
+            ]}],
+            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+        }
+        req = urllib.request.Request(
+            url, data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json", "x-goog-api-key": key},
+        )
+        image = err = None
+        for attempt in (1, 2):
+            try:
+                with urllib.request.urlopen(req, timeout=180) as resp:
+                    parts = json.load(resp)["candidates"][0]["content"]["parts"]
+                    image = next((p["inlineData"]["data"] for p in parts if "inlineData" in p), None)
+                    err = None if image else "model returned no image part"
+            except Exception as e:
+                err = getattr(e, "read", lambda: b"")()[-300:].decode(errors="replace") or str(e)
+            if image:
+                break
+            if attempt == 1:
+                time.sleep(15)
+        if image is None:
+            print(f"\n[imagine] scene {i} failed: {err}", file=sys.stderr)
+            continue
+        dest.write_bytes(base64.b64decode(image))
+        captions.append((dest, t, headline))
+        print(f"\x1b[2K\r[{i + 1}/{len(notes)}] {dest.name}", end="", file=sys.stderr, flush=True)
+        (gallery / "gallery.md").write_text(
+            f"# {sid}\n\n" + "\n".join(f"## {stamp(tt)} {h}\n\n![{h}]({d.name})\n" for d, tt, h in captions)
+        )
+        if post_cmd:
+            subprocess.run(post_cmd, shell=True, input=f"{dest}\n{headline}".encode(), capture_output=True)
+    print(f"\x1b[2K\rGallery: {gallery}/gallery.md  ({len(captions)}/{len(notes)} scenes)", file=sys.stderr)
 
 
 class NoteTaker:
@@ -352,11 +431,18 @@ def main() -> None:
     parser.add_argument("--save-audio", action="store_true", help="Also record the session to a wav next to the transcript (~110 MB/hour), enabling --polish later")
     parser.add_argument("--polish", type=Path, default=None, metavar="AUDIO", help="Re-transcribe a session recording offline with full context (better accuracy) and exit")
     parser.add_argument("--enrich", type=Path, default=None, metavar="KEYNOTES", help="Expand a key-notes file into rich paragraphs (key-notes-enriched-*.md) using its session transcript, and exit")
+    parser.add_argument("--imagine", type=Path, default=None, metavar="KEYNOTES", help="Generate a gallery image per key-note (Gemini API, needs GEMINI_API_KEY) and exit")
+    parser.add_argument("--avatars", type=Path, default=Path("avatars"), help="Directory of character reference images for --imagine (default avatars/)")
+    parser.add_argument("--image-model", default="gemini-2.5-flash-image", help="Gemini image model for --imagine (default: %(default)s)")
+    parser.add_argument("--post-cmd", default=None, help="Optional hook run per generated image: gets '<path>\\n<caption>' on stdin (future: post to an API)")
     parser.add_argument("--wav", type=Path, default=None, help=argparse.SUPPRESS)  # testing: 16k mono wav instead of mic
     args = parser.parse_args()
 
     if args.enrich:  # no ASR model needed
         enrich(args.enrich, args.notes_cmd, args.notes_interval * 1.5)
+        return
+    if args.imagine:  # no ASR model needed
+        imagine(args.imagine, args.avatars, args.image_model, args.post_cmd)
         return
 
     print(f"Loading {args.model} …", file=sys.stderr)

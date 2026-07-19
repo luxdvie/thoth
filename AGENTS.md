@@ -15,6 +15,8 @@ Realtime local speech-to-text for tabletop sessions. One file of product code: `
 
 - **Notes layer (`--notes`):** `NoteTaker` fires every `--notes-interval` seconds of *stream time* (so `--wav` tests behave deterministically), summarizing sentences since the last fire via `--notes-cmd` (prompt on stdin → post on stdout; default `claude -p --model haiku`). Summaries run on daemon threads and are drained by the main loop — never call the summarizer synchronously in the audio path. The prompt asks for `SKIP` on no-news; notes append to `key-notes-<ts>.md` and never rewrite. Notes are stamped at the *start* of the window they summarize (fire-time stamps read one interval late against the transcript — real-session bug). Summarizer failures retry once after 10 s and then log loudly; never drop a note silently (a 3.75 h real session lost ~20 min gaps to silent CLI failures).
 
+- **Imagine layer (`--imagine`):** one Gemini `generateContent` REST call per key-note (no SDK dep — stdlib urllib), avatar images inlined base64 as character references, `responseModalities: ["TEXT","IMAGE"]`. Gallery writes are resumable (existing files skipped) and `gallery.md` re-renders after every image. `--post-cmd` is the future social/API hook: `<path>\n<caption>` on stdin, same stdin→stdout contract as `--notes-cmd`. `avatars/` and `gallery/` are gitignored — personal content.
+
 ## Constraints learned the hard way
 
 - Keep the `numba>=0.60` pin. Without it uv's resolver picks numba 0.53 (via librosa), which cannot build on modern Python.
