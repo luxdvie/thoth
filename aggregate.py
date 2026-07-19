@@ -16,9 +16,11 @@ name = sys.argv[2]
 patterns = sys.argv[3:] or ["session", "key-notes", "key-notes-enriched", "wav"]
 
 
-def concat_md(glob: str, out: Path, title: str) -> None:
-    parts = sorted(p for p in sessions.glob(glob) if "-polished" not in p.stem and "enriched" not in p.stem or "enriched" in glob)
-    parts = [p for p in parts if p != out]
+def concat_md(glob: str, out: Path, title: str, exclude: tuple[str, ...] = ()) -> None:
+    parts = sorted(
+        p for p in sessions.glob(glob)
+        if p != out and not p.stem.startswith("campaign-") and not any(x in p.stem for x in exclude)
+    )
     if not parts:
         print(f"  (no files for {glob})")
         return
@@ -52,7 +54,7 @@ def concat_wav(out: Path) -> None:
 
 for pat in patterns:
     if pat == "session":
-        concat_md("session-*.md", sessions / f"{name}.md", f"{name} — full transcript")
+        concat_md("session-*.md", sessions / f"{name}.md", f"{name} — full transcript", exclude=("-polished",))
     elif pat == "session-polished":
         concat_md("session-*-polished.md", sessions / f"{name}-polished.md", f"{name} — polished transcript")
     elif pat == "key-notes":
