@@ -306,7 +306,12 @@ def attribute(transcript: Path, cast_path: Path, cmd: str) -> None:
         sys.exit(f"no stamped lines found in {transcript}")
     out = transcript.with_name(transcript.stem + "-attributed.md")
     labels: list[str] = []
-    for i in range(0, len(rows), ATTRIBUTE_CHUNK):
+    if out.exists():  # resume a partial run
+        done = parse_stamped(out)
+        if [t for t, _ in done] == [t for t, _ in rows[: len(done)]]:
+            labels = [txt.split(":**", 1)[0].lstrip("*") for _, txt in done]
+            print(f"[attribute] resuming at line {len(labels)}", file=sys.stderr)
+    for i in range(len(labels), len(rows), ATTRIBUTE_CHUNK):
         block = rows[i : i + ATTRIBUTE_CHUNK]
         prev = "\n".join(
             f"{stamp(t)} {lab}: {txt}"
@@ -315,11 +320,15 @@ def attribute(transcript: Path, cast_path: Path, cmd: str) -> None:
         lines = "\n".join(f"{j + 1}. {txt}" for j, (t, txt) in enumerate(block))
         prompt = ATTRIBUTE_PROMPT.format(cast=cast, prev=prev, n=len(block), lines=lines)
         got: list[str] = []
-        for attempt in (1, 2):
-            r = subprocess.run(cmd, shell=True, capture_output=True, timeout=300, input=prompt.encode())
-            got = [l.strip().lstrip("0123456789. ") for l in r.stdout.decode().strip().splitlines() if l.strip()]
-            if r.returncode == 0 and got:
-                break
+        for attempt in (1, 2, 3):
+            try:
+                r = subprocess.run(cmd, shell=True, capture_output=True, timeout=300, input=prompt.encode())
+                got = [l.strip().lstrip("0123456789. ") for l in r.stdout.decode().strip().splitlines() if l.strip()]
+                if r.returncode == 0 and got:
+                    break
+                got = []
+            except subprocess.TimeoutExpired:
+                print(f"\n[attribute] chunk {i // ATTRIBUTE_CHUNK}: attempt {attempt} timed out", file=sys.stderr)
             time.sleep(10)
         if len(got) != len(block):
             print(f"\n[attribute] chunk {i // ATTRIBUTE_CHUNK}: got {len(got)} labels for {len(block)} lines — padding", file=sys.stderr)
