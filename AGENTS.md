@@ -50,6 +50,14 @@ mic ─ thoth.py ──► session-<ts>.md  + session-<ts>.wav + key-notes-<ts>.
 - **Cutscenes (design decision, deliberate):** scenes are per-note (a moment → keyframes); cutscenes are per-SPAN (an arc → 6 keyframes + one recap narration). The UI separates them as sidebar modes because cutscenes CONSUME promoted scenes — paint stills first, then score the sequence. Recap narration sources from the enriched key-notes in the span (the editorial layer), NOT raw/polished transcript — a 30-min span of transcript is thousands of noisy words. Promoted cutscene = `cutscenes/<sid>/<span>/{narration.wav, manifest.json}`; the manifest (keyframes, stamps, script, voice, duration) is the video-assembly contract.
 - **Narration:** `POST /api/cutscene-script` ({entries: [{stamp, headline, body}], seconds} → word-budgeted arc recap via notes CLI), `POST /api/narrate` ({sid, span: "NNN-MMM", script, voice} → Gemini TTS `gemini-3.1-flash-tts-preview`, returns 24 kHz wav to `generated-audio/<sid>/cut-<span>-NN.wav` + sidecar with measured duration), `POST /api/promote-cutscene` → `cutscenes/<sid>/<span>/`. TTS returns raw s16le PCM — the wav header is built by hand; duration = pcm_bytes/2/24000. NARRATION_WPM=95 is *measured* (gravitas style runs 75–102 wpm, take-dependent — do not "fix" it back to 150); exact video fit is ffmpeg `atempo`'s job at assembly, not the TTS call's.
 
+## Image prompt structure (learned from Austin's hand-tuned prompts — keep it)
+
+Prompts are assembled server-side in `build_prompt()` as **Command / Setting(Context) / Scene** — separating persistent world-state from the per-note beat is the single biggest quality lever after model tier (evidence: generated-images/2026-07-18-1801/018-*, 020-* vs earlier takes). Rules:
+- `avatars/party.md` + `avatars/npcs.md`: "Name: one visual line" per row; party lines always injected, NPC lines ONLY when the scene/context names them (unconditional injection makes NPCs photobomb — real failure, 001-01).
+- Session Setting persists in `sessions/context-<sid>.txt`; `/api/stage-context` derives it from the polished transcript window around the note (staging facts only the transcript knows — bite wounds, bait on the rail).
+- Aspect ratio via `generationConfig.imageConfig.aspectRatio` (default 16:9 — keyframe sets must share one AR). Continuity: previous promoted keyframe appended as the LAST image part + CONTINUITY_PROMPT clause.
+- Sidecars record context/scene/prompt/aspect/continuity/model separately — never collapse them back into one prompt string.
+
 ## Constraints learned the hard way
 
 - Keep the `numba>=0.60` pin. Without it uv's resolver picks numba 0.53 (via librosa), which cannot build on modern Python.

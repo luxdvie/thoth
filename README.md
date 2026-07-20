@@ -113,8 +113,11 @@ A local curation UI for turning key-notes into illustrated scenes:
 
 - 📜 Browse every key-note from every session (chronicle text inline), pick one to work on
 - 🧝 Toggle which party members ride along as character references
-- ✍️ Edit the generated prompt before casting it
-- ✨ **Elaborate** asks an art director (the `claude` CLI) to expand the headline into a full brief — composition, camera, lighting, who's doing what — visible and editable before you spend a cent
+- 🎭 Prompts assemble from three layers — **Command** (style + party bible) / **Setting** (persistent scene state) / **Scene** (the beat) — so staging stays continuous across a whole stretch of session
+- 📍 **Derive from transcript** — a stage-manager pass reads the polished transcript around the note and drafts the Setting (location, who's present, who's where, ongoing state); edit it once, it persists until the party moves
+- ✨ **Elaborate** asks an art director (the `claude` CLI) to expand the beat into composition, camera, and action — without restating the Setting
+- 🧬 **Party & NPC bibles** — `avatars/party.md` (one visual line per character, injected beside their reference image) and `avatars/npcs.md` (recurring NPCs stay consistent, injected only when the scene names them)
+- 🎞️ **16:9 by default** (aspect picker for 1:1/9:16/…) and 🔗 **continuity chaining** — the previous promoted keyframe rides along as a reference so a cutscene's frames share palette and light
 - 🖼️ **Conjure** sends it to Nano Banana **Pro** (`gemini-3-pro-image-preview`, ~13¢, ChatGPT-tier) or regular Nano Banana (~4¢) — picker in the UI. Every take is kept in gitignored `generated-images/<session>/` with a JSON sidecar of the exact prompt, party, and model used
 - ✦ **Promote** copies your favorite take into `gallery/<session>/` (the curated record); **Skip** moves on, takes stay in staging
 - 🎬 **Cutscenes mode** — the second tab. A cutscene is an *arc*, not a moment: click a start note and an end note, and the studio shows the promoted keyframes inside that span (with a 6-frame target for the ComfyUI template) and a recap-narration workbench. **Draft recap** weaves the span's chronicle entries into one "previously on…" story at a word budget, pick a voice (Charon the grave narrator, Fenrir, Kore, Aoede, Puck), **Narrate** renders it via Gemini TTS (~1¢/take) into gitignored `generated-audio/<session>/`, and **Promote 🎬** writes `cutscenes/<session>/<span>/` — `narration.wav` plus a `manifest.json` listing keyframes, script, voice, and duration: everything video assembly needs

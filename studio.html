@@ -239,19 +239,22 @@ function renderNotes(){
 }
 
 /* ═══ SCENES ═══ */
-function defaultPrompt(n){
-  const names=[...activeAvatars].join(", ");
-  const scene=n.body?n.headline+" — "+n.body:n.headline;
-  return S.prompt_template.replace("{names}",names).replace("{scene}",scene);
-}
+function defaultScene(n){ return n.body?n.headline+" — "+n.body:n.headline; }
 function selectScene(sid,n){
   cur={sid,idx:n.idx,note:n}; selGen=n.generations.at(-1)||null;
   renderNotes(); renderScene(true);
 }
 function pickedModel(){ return localStorage.getItem("thoth-model")||S.model; }
+function pickedAspect(){ return localStorage.getItem("thoth-aspect")||"16:9"; }
+function prevKeyframe(){
+  const notes=sess(cur.sid).notes;
+  for(let i=cur.idx-1;i>=0;i--) if(notes[i].gallery.length) return notes[i].gallery.at(-1);
+  return null;
+}
 function renderScene(resetPrompt){
   const n=cur.note;
-  const keepPrompt=!resetPrompt&&$("#prompt")?$("#prompt").value:null;
+  const keepScene=!resetPrompt&&$("#scene")?$("#scene").value:null;
+  const keepCtx=$("#ctx")?$("#ctx").value:sess(cur.sid).context;
   $("#main").innerHTML=`
     <div class="crumb">${esc(cur.sid)} · NOTE ${pad(n.idx)} · ${esc(n.stamp)}${n.promoted?" · <span style='color:var(--verdigris)'>PROMOTED ✦</span>":""}</div>
     <h2 class="headline">${esc(n.headline)}</h2>
@@ -263,13 +266,21 @@ function renderScene(resetPrompt){
         <img src="${a.url}" alt=""><div class="nm">${esc(a.name)}</div>
       </div>`).join("")}</div>
     <div class="seclabel-row">
-      <label class="sec">Incantation — edit freely</label>
+      <label class="sec">Setting — persists across notes</label>
+      <span class="spacer"></span>
+      <button id="stage" class="mini">📍 Derive from transcript</button>
+    </div>
+    <textarea id="ctx" spellcheck="false" style="min-height:84px" placeholder="Where the party is and how the scene is staged — write it once, reuse until they move…"></textarea>
+    <div class="seclabel-row" style="margin-top:16px">
+      <label class="sec">Scene — the beat</label>
       <span class="spacer"></span>
       <button id="elaborate" class="mini">✨ Elaborate</button>
     </div>
-    <textarea id="prompt" spellcheck="false"></textarea>
+    <textarea id="scene" spellcheck="false" style="min-height:110px"></textarea>
     <div class="actions">
       <select id="model">${Object.entries(S.models).map(([id,label])=>`<option value="${id}" ${id===pickedModel()?"selected":""}>${esc(label)}</option>`).join("")}</select>
+      <select id="aspect">${S.aspects.map(a=>`<option value="${a}" ${a===pickedAspect()?"selected":""}>${a}</option>`).join("")}</select>
+      ${prevKeyframe()?`<label class="wordcount" style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="chain" checked> 🔗 chain <img src="${prevKeyframe()}" style="width:30px;height:30px;object-fit:cover;border:1px solid var(--hairline)"></label>`:""}
       <button id="gen">Conjure</button>
       <button id="promote" class="promote" ${selGen?"":"disabled"}>Promote ✦</button>
       <button id="skip" class="skip">Skip</button>
@@ -279,31 +290,54 @@ function renderScene(resetPrompt){
       ${selGen?`<img class="hero" src="${selGen}">`:""}
       <div id="strip">${n.generations.map(g=>`<img src="${g}" data-g="${g}" class="${g===selGen?"sel":""}">`).join("")}</div>
     </div>`;
-  $("#prompt").value=keepPrompt??defaultPrompt(n);
+  $("#scene").value=keepScene??defaultScene(n);
+  $("#ctx").value=keepCtx||"";
   document.querySelectorAll(".avatar").forEach(el=>el.onclick=()=>{
     const nm=el.dataset.n;
     activeAvatars.has(nm)?activeAvatars.delete(nm):activeAvatars.add(nm);
     el.classList.toggle("on");
-    if($("#prompt").dataset.touched!=="1") $("#prompt").value=defaultPrompt(n);
   });
-  $("#prompt").addEventListener("input",e=>e.target.dataset.touched="1");
+  $("#ctx").addEventListener("blur",()=>{
+    sess(cur.sid).context=$("#ctx").value;
+    fetch("/api/context",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({sid:cur.sid,context:$("#ctx").value})});
+  });
   document.querySelectorAll("#strip img").forEach(im=>im.onclick=()=>{selGen=im.dataset.g; renderScene(false);});
   $("#model").onchange=e=>localStorage.setItem("thoth-model",e.target.value);
+  $("#aspect").onchange=e=>localStorage.setItem("thoth-aspect",e.target.value);
+  $("#stage").onclick=deriveContext;
   $("#elaborate").onclick=elaborate;
   $("#gen").onclick=generate;
   $("#promote").onclick=promoteScene;
   $("#skip").onclick=()=>{cur=null; renderNotes(); empty("Skipped. Choose another moment.");};
+}
+async function deriveContext(){
+  const notes=sess(cur.sid).notes;
+  const t1=notes[cur.idx+1]?notes[cur.idx+1].t:cur.note.t+300;
+  const st=$("#status"); st.className="busy"; st.textContent="the stage manager reads the transcript";
+  $("#stage").disabled=true;
+  try{
+    const r=await fetch("/api/stage-context",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({sid:cur.sid,t0:cur.note.t,t1})});
+    const j=await r.json();
+    if(j.error) throw new Error(j.error);
+    $("#ctx").value=j.context;
+    sess(cur.sid).context=j.context;
+    st.className=""; st.textContent=`staged from ${j.source} — edit freely`;
+  }catch(e){ st.className="err"; st.textContent=e.message.slice(0,160); }
+  $("#stage").disabled=false;
 }
 async function elaborate(){
   const st=$("#status"); st.className="busy"; st.textContent="consulting the art director";
   $("#elaborate").disabled=true;
   try{
     const r=await fetch("/api/elaborate",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({headline:cur.note.headline,body:cur.note.body,avatars:[...activeAvatars]})});
+      body:JSON.stringify({headline:cur.note.headline,body:cur.note.body,
+        context:$("#ctx").value,avatars:[...activeAvatars]})});
     const j=await r.json();
     if(j.error) throw new Error(j.error);
-    $("#prompt").value=j.prompt; $("#prompt").dataset.touched="1";
-    st.className=""; st.textContent="incantation elaborated — edit or conjure";
+    $("#scene").value=j.scene;
+    st.className=""; st.textContent="scene elaborated — edit or conjure";
   }catch(e){ st.className="err"; st.textContent=e.message.slice(0,180); }
   $("#elaborate").disabled=false;
 }
@@ -313,7 +347,9 @@ async function generate(){
   try{
     const r=await fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({sid:cur.sid,idx:cur.idx,stamp:cur.note.stamp,headline:cur.note.headline,
-        prompt:$("#prompt").value,avatars:[...activeAvatars],model:pickedModel()})});
+        context:$("#ctx").value,scene:$("#scene").value,avatars:[...activeAvatars],
+        model:pickedModel(),aspect:$("#aspect").value,
+        continuity:($("#chain")&&$("#chain").checked)?prevKeyframe():null})});
     const j=await r.json();
     if(j.error) throw new Error(j.error);
     cur.note.generations.push(j.url); selGen=j.url;

@@ -212,7 +212,13 @@ def imagine(notes_path: Path, avatars_dir: Path, model: str, post_cmd: str | Non
     avatars = sorted(p for p in avatars_dir.glob("*") if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
     if not avatars:
         sys.exit(f"no avatar images found in {avatars_dir}/")
-    names = ", ".join(p.stem for p in avatars)
+    party = {}  # avatars/party.md: "Name: one visual line" — same format the studio uses
+    if (avatars_dir / "party.md").exists():
+        for line in (avatars_dir / "party.md").read_text().splitlines():
+            if ":" in line and not line.lstrip().startswith("#"):
+                k, v = line.split(":", 1)
+                party[k.strip()] = v.strip()
+    names = "; ".join(f"{p.stem} — {party[p.stem]}" if p.stem in party else p.stem for p in avatars)
     avatar_parts = [
         {"inline_data": {
             "mime_type": "image/jpeg" if p.suffix.lower() in (".jpg", ".jpeg") else f"image/{p.suffix.lower().lstrip('.')}",
