@@ -66,6 +66,10 @@ Prompts are assembled server-side in `build_prompt()` as **Command / Setting(Con
 - Austin's `GEMINI_API_KEY` is a **fish universal variable** — invisible to non-fish parent shells. Both Gemini call sites fall back to `fish -c 'echo -n $GEMINI_API_KEY'`; keep that fallback when touching key handling.
 - Image quality lesson: flash-tier Nano Banana underwhelmed Austin vs ChatGPT; the fix was BOTH the Pro model (`gemini-3-pro-image-preview`, studio default, ~13¢/image — flash stays default for batch `--imagine`) AND an elaborate step (short headlines waste a good image model; detailed art-director prompts are half the quality). The choice of Gemini over gpt-image-1 was deliberate: better multi-reference character consistency, cheaper (~$0.04/image), no org verification. Override with `--image-model` / `THOTH_IMAGE_MODEL`.
 
+## Diarization guidance (field results — don't relearn this)
+
+Zach's session-1 test on a single far-field iPhone, pushing `--speakers` hard: raising `--max-speakers` (6/10/25) only fragments the same people across more labels, and over-split labels are LEAKY (one label held DM narration + several players) so fragments can't be remapped to people. Root cause: overlapping speech on a far mic is noise, not a voiceprint — no parameter and no better single mic fixes it. What works, in order of bang/buck: (1) `--attribute` — LLM speaker labeling from dialogue context over the polished transcript with `avatars/cast.md` (validated: 240 lines → ~5% unsure; filling in real player names + verbal tells improves it further); (2) one recording track per speaker — everyone's phone runs Voice Memos, clap to sync, transcribe per-track, merge by timestamp = diarization perfect by construction (roadmap: `--merge-tracks`); (3) calibration phase for acoustic --speakers remains a nice-to-have, not the ceiling-raiser.
+
 ## Roadmap (agreed with Austin, in order)
 
 1. **Session films**: 6 promoted gallery scenes → ComfyUI keyframe template (https://comfy.org/workflows/templates-6-key-frames-920c6926e747/) per clip → `ffmpeg concat` of clips. Images are the hard currency; video comes after.

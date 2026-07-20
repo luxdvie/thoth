@@ -43,6 +43,8 @@ Four hours of table time becomes a searchable, timestamped campaign log. Feed it
 | `--notes-cmd CMD` | Summarizer command, prompt on stdin → post on stdout (default `claude -p --model haiku`) |
 | `--save-audio` | Also record the session to a `.wav` next to the transcript (~110 MB/hour) |
 | `--polish AUDIO` | Re-transcribe a recording offline with full context — noticeably more accurate than the live pass |
+| `--attribute TRANSCRIPT` | 🗣️ Label speakers by dialogue context (LLM pass over the transcript + `avatars/cast.md`) — the diarization that actually works on one mic |
+| `--cast FILE` | Cast list for `--attribute` (default `avatars/cast.md`): `Name: how to recognize them` |
 | `--enrich KEYNOTES` | Expand a key-notes file into a rich chronicle (`key-notes-enriched-*.md`), grounded in the transcript |
 | `--imagine KEYNOTES` | 🎨 Generate a scene image per key-note into `gallery/<session>/`, with `avatars/` as character references (Gemini, needs `GEMINI_API_KEY`) |
 | `--post-cmd CMD` | Hook run per generated image (`<path>\n<caption>` on stdin) — wire it to a poster later |
@@ -148,7 +150,7 @@ Three small PEP 723 scripts — no venv, no pyproject, no build step; `uv` handl
 | `aggregate.py` | The binder: stitch multi-part sessions into `campaign-*` files |
 
 - 🍎 Apple Silicon only (MLX)
-- 🗣️ Speaker ID is per-sentence clustering, not full diarization — two people talking over each other land in one line, and very similar voices may merge (tune `--speaker-threshold`)
+- 🗣️ Acoustic `--speakers` is per-sentence clustering and **cannot work on a single far-field mic** (field-tested: more `--max-speakers` only fragments people across labels, and overlap makes labels leaky). Use `--attribute` instead — dialogue is self-identifying ("maul damage" = the barbarian), so an LLM pass over the polished transcript beats voiceprints on one mic. The acoustic ceiling-raiser isn't a $300 mic: it's **one track per speaker** (everyone's phone records Voice Memos, sync by a clap) — per-track transcription makes diarization perfect by construction
 - 🇬🇧 English-tuned default model; puns in Common only
 
 ## 📜 License

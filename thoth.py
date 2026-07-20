@@ -277,6 +277,63 @@ def imagine(notes_path: Path, avatars_dir: Path, model: str, post_cmd: str | Non
     print(f"\x1b[2K\rGallery: {gallery}/gallery.md  ({len(captions)}/{len(notes)} scenes)", file=sys.stderr)
 
 
+ATTRIBUTE_PROMPT = (
+    "You attribute speakers in a D&D session transcript (noisy speech-to-text — "
+    "ignore garble). The cast:\n{cast}\n\n"
+    "Dialogue is self-identifying: the DM narrates, voices NPCs, and calls for "
+    "rolls; players reference their own abilities, sheets, and dice; people address "
+    "each other by name. Use those clues plus continuity with the previous lines.\n\n"
+    "Previously attributed lines:\n{prev}\n\n"
+    "Short reactions ('Yeah.', 'Nice.') usually belong to whoever the DM is "
+    "addressing or whoever spoke last in that exchange — infer from conversational "
+    "flow. Prefer your best inference; reserve '?' for lines with no usable signal "
+    "at all.\n\n"
+    "Now attribute these {n} numbered lines. Output EXACTLY {n} lines: line k is "
+    "the speaker of input line k — a name from the cast, or '?'. No numbering, no "
+    "commentary, nothing else.\n\n{lines}"
+)
+ATTRIBUTE_CHUNK = 120
+
+
+def attribute(transcript: Path, cast_path: Path, cmd: str) -> None:
+    """Label each transcript line with a speaker via dialogue-context inference —
+    the diarization that actually works on single-mic recordings."""
+    if not cast_path.exists():
+        sys.exit(f"no cast file at {cast_path} — list the table as 'Name: how to recognize them'")
+    cast = "\n".join(l for l in cast_path.read_text().splitlines() if l.strip() and not l.lstrip().startswith("#"))
+    rows = parse_stamped(transcript)
+    if not rows:
+        sys.exit(f"no stamped lines found in {transcript}")
+    out = transcript.with_name(transcript.stem + "-attributed.md")
+    labels: list[str] = []
+    for i in range(0, len(rows), ATTRIBUTE_CHUNK):
+        block = rows[i : i + ATTRIBUTE_CHUNK]
+        prev = "\n".join(
+            f"{stamp(t)} {lab}: {txt}"
+            for (t, txt), lab in list(zip(rows, labels))[-12:]
+        ) or "(session start)"
+        lines = "\n".join(f"{j + 1}. {txt}" for j, (t, txt) in enumerate(block))
+        prompt = ATTRIBUTE_PROMPT.format(cast=cast, prev=prev, n=len(block), lines=lines)
+        got: list[str] = []
+        for attempt in (1, 2):
+            r = subprocess.run(cmd, shell=True, capture_output=True, timeout=300, input=prompt.encode())
+            got = [l.strip().lstrip("0123456789. ") for l in r.stdout.decode().strip().splitlines() if l.strip()]
+            if r.returncode == 0 and got:
+                break
+            time.sleep(10)
+        if len(got) != len(block):
+            print(f"\n[attribute] chunk {i // ATTRIBUTE_CHUNK}: got {len(got)} labels for {len(block)} lines — padding", file=sys.stderr)
+        got = (got + ["?"] * len(block))[: len(block)]
+        labels.extend(got)
+        out.write_text("\n".join(
+            f"{stamp(t)} **{lab}:** {txt}" for (t, txt), lab in zip(rows, labels)
+        ) + "\n")
+        print(f"\x1b[2K\r[attribute] {len(labels)}/{len(rows)} lines", end="", file=sys.stderr, flush=True)
+    n = len({l for l in labels if l != "?"})
+    unsure = labels.count("?")
+    print(f"\x1b[2K\rAttributed transcript: {out}  ({n} speakers, {unsure} unsure)", file=sys.stderr)
+
+
 class NoteTaker:
     """Periodic 'twitter post' summaries of the transcript. Each note is produced
     by piping a prompt into `cmd` (stdin → stdout) on a background thread, so the
@@ -442,6 +499,8 @@ def main() -> None:
     parser.add_argument("--save-audio", action="store_true", help="Also record the session to a wav next to the transcript (~110 MB/hour), enabling --polish later")
     parser.add_argument("--polish", type=Path, default=None, metavar="AUDIO", help="Re-transcribe a session recording offline with full context (better accuracy) and exit")
     parser.add_argument("--enrich", type=Path, default=None, metavar="KEYNOTES", help="Expand a key-notes file into rich paragraphs (key-notes-enriched-*.md) using its session transcript, and exit")
+    parser.add_argument("--attribute", type=Path, default=None, metavar="TRANSCRIPT", help="Label speakers by dialogue context (LLM pass; works where --speakers can't) and exit")
+    parser.add_argument("--cast", type=Path, default=Path("avatars/cast.md"), help="Cast list for --attribute: 'Name: how to recognize them' per line")
     parser.add_argument("--imagine", type=Path, default=None, metavar="KEYNOTES", help="Generate a gallery image per key-note (Gemini API, needs GEMINI_API_KEY) and exit")
     parser.add_argument("--avatars", type=Path, default=Path("avatars"), help="Directory of character reference images for --imagine (default avatars/)")
     parser.add_argument("--image-model", default="gemini-2.5-flash-image", help="Gemini image model for --imagine (default: %(default)s)")
@@ -451,6 +510,9 @@ def main() -> None:
 
     if args.enrich:  # no ASR model needed
         enrich(args.enrich, args.notes_cmd, args.notes_interval * 1.5)
+        return
+    if args.attribute:  # no ASR model needed
+        attribute(args.attribute, args.cast, args.notes_cmd)
         return
     if args.imagine:  # no ASR model needed
         imagine(args.imagine, args.avatars, args.image_model, args.post_cmd)
