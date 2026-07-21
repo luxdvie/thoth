@@ -54,7 +54,7 @@ Transcription needs **nothing** — no keys, no accounts, first run downloads th
 | `--notes-interval SEC` | Seconds between posts (default `180`) |
 | `--notes-cmd CMD` | Summarizer command, prompt on stdin → post on stdout (default `claude -p --model haiku`) |
 | `--save-audio` | Also record the session to a `.wav` next to the transcript (~110 MB/hour) |
-| `--polish AUDIO` | Re-transcribe a recording offline with full context — noticeably more accurate than the live pass |
+| `--polish AUDIO` | Re-transcribe a recording offline with full context — noticeably more accurate than the live pass. Add `--notes` to also distill a key-notes file from the recording |
 | `--attribute TRANSCRIPT` | 🗣️ Label speakers by dialogue context (LLM pass over the transcript + `avatars/cast.md`) — the diarization that actually works on one mic |
 | `--cast FILE` | Cast list for `--attribute` (default `avatars/cast.md`): `Name: how to recognize them` |
 | `--enrich KEYNOTES` | Expand a key-notes file into a rich chronicle (`key-notes-enriched-*.md`), grounded in the transcript |
@@ -74,6 +74,8 @@ uv run thoth.py --polish sessions/session-….wav  # then: full-context re-trans
 ```
 
 The polished pass re-reads the whole recording with full context — same model, better output, exact timestamps, minutes for a multi-hour session. `--speakers` works here too, and better than live (offline timestamps make the voice slicing precise). Live transcript for the table, polished one for the campaign log. 📖
+
+Forgot `--notes` during the session (or only have a recording)? `--polish … --notes` generates the key-notes file offline from the polished transcript, same summarizer, same format.
 
 ## 🐦 Live session feed
 

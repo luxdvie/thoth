@@ -437,7 +437,7 @@ class WavWriter:
         self.f.close()
 
 
-def polish(src: Path, model, rate: int, speakers: SpeakerLog | None) -> None:
+def polish(src: Path, model, rate: int, speakers: SpeakerLog | None) -> list[tuple[float, int | None, str]]:
     """Offline full-context re-transcription of a session recording. Unlike the
     streaming decode, sentence timestamps here are absolute and trustworthy."""
     out = src.with_name(src.stem + "-polished.md")
@@ -458,6 +458,36 @@ def polish(src: Path, model, rate: int, speakers: SpeakerLog | None) -> None:
         rows.append((s.start, label, text))
     out.write_text(render(rows, ""))
     print(f"\x1b[2K\rPolished transcript: {out}  ({len(rows)} lines)", file=sys.stderr)
+    return rows
+
+
+def offline_notes(rows: list[tuple[float, int | None, str]], path: Path, cmd: str, interval: float) -> None:
+    """Key-notes for an already-transcribed session (--polish --notes): window the
+    transcript by interval seconds and run the same summarizer as live --notes,
+    synchronously — offline there's no audio loop to keep unblocked, and serial
+    calls preserve the previous-post chaining."""
+    if path.exists():
+        print(f"{path.name} already exists — delete it to regenerate", file=sys.stderr)
+        return
+    windows: list[tuple[float, list[str]]] = []
+    cur: list[str] = []
+    t0 = 0.0
+    for t, _label, text in rows:
+        if not cur:
+            t0 = t
+        elif t - t0 >= interval:
+            windows.append((t0, cur))
+            cur, t0 = [], t
+        cur.append(text)
+    if cur:
+        windows.append((t0, cur))
+
+    nt = NoteTaker(path, cmd, interval)
+    for i, (t, texts) in enumerate(windows):
+        print(f"\x1b[2K\rSummarizing window {i + 1}/{len(windows)} …", end="", file=sys.stderr, flush=True)
+        nt._summarize(t, "\n".join(texts))
+        nt.drain()
+    print(f"\x1b[2K\rKey notes: {path}", file=sys.stderr)
 
 
 def mic_chunks(rate: int, device):
@@ -502,7 +532,7 @@ def main() -> None:
     parser.add_argument("--speakers", action="store_true", help="Experimental: label sentences by voice (Speaker 1/2/…)")
     parser.add_argument("--speaker-threshold", type=float, default=0.45, help="Same-speaker similarity floor (lower = fewer, broader speakers)")
     parser.add_argument("--max-speakers", type=int, default=8, help="Never mint more than N speakers; extras snap to the nearest voice")
-    parser.add_argument("--notes", action="store_true", help="Periodic one-line 'what's happening' posts to key-notes-<session>.md (uses the claude CLI by default)")
+    parser.add_argument("--notes", action="store_true", help="Periodic one-line 'what's happening' posts to key-notes-<session>.md (uses the claude CLI by default; combine with --polish to distill an existing recording)")
     parser.add_argument("--notes-interval", type=float, default=180, metavar="SEC", help="Seconds between notes (default 180)")
     parser.add_argument("--notes-cmd", default="claude -p --model haiku", help="Shell command that reads a prompt on stdin and prints the post (default: %(default)s)")
     parser.add_argument("--save-audio", action="store_true", help="Also record the session to a wav next to the transcript (~110 MB/hour), enabling --polish later")
@@ -527,6 +557,9 @@ def main() -> None:
         imagine(args.imagine, args.avatars, args.image_model, args.post_cmd)
         return
 
+    if args.notes and shutil.which(args.notes_cmd.split()[0]) is None:
+        sys.exit(f"--notes needs `{args.notes_cmd.split()[0]}` on PATH (or pass --notes-cmd)")
+
     print(f"Loading {args.model} …", file=sys.stderr)
     model = from_pretrained(args.model)
     rate = model.preprocessor_config.sample_rate
@@ -535,7 +568,10 @@ def main() -> None:
     ) if args.speakers else None
 
     if args.polish:
-        polish(args.polish, model, rate, speakers)
+        rows = polish(args.polish, model, rate, speakers)
+        if args.notes:
+            notes_path = args.polish.parent / f"key-notes-{args.polish.stem.removeprefix('session-')}.md"
+            offline_notes(rows, notes_path, args.notes_cmd, args.notes_interval)
         return
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -544,8 +580,6 @@ def main() -> None:
     recorder = WavWriter(args.out / f"{session}.wav", rate) if args.save_audio else None
     notes = None
     if args.notes:
-        if shutil.which(args.notes_cmd.split()[0]) is None:
-            sys.exit(f"--notes needs `{args.notes_cmd.split()[0]}` on PATH (or pass --notes-cmd)")
         notes = NoteTaker(args.out / f"key-notes-{session.removeprefix('session-')}.md", args.notes_cmd, args.notes_interval)
 
     # Parakeet's streaming token timestamps are window-relative — once the cache
