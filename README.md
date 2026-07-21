@@ -31,6 +31,18 @@ That's it. First run pulls the model (~600 MB), then you're live:
 
 Four hours of table time becomes a searchable, timestamped campaign log. Feed it to your favorite LLM for session recaps, quote your rogue's exact words back at them, settle the "you never told us about the trapdoor" dispute with receipts.
 
+## 🔧 Setup
+
+Transcription needs **nothing** — no keys, no accounts, first run downloads the model and you're live. The optional storytelling layers have two prerequisites:
+
+1. **🤖 The `claude` CLI, installed and logged in** — all text-LLM work (`--notes`, `--enrich`, `--attribute`, the studio's Elaborate/Derive/Draft-recap buttons) shells out to [Claude Code](https://claude.com/claude-code) as `claude -p`. Any stdin→stdout command can stand in via `--notes-cmd` (e.g. `ollama run llama3`).
+2. **🎨 A Gemini API key** (a.k.a. Nano Banana) — image generation and TTS narration (`--imagine`, the studio's Conjure/Narrate). Create one at [aistudio.google.com/apikey](https://aistudio.google.com/apikey), attach billing and add a few bucks — the good image model (`gemini-3-pro-image-preview`) is paid-tier, ~13¢/image (regular Nano Banana ~4¢, TTS ~1¢/take). Then:
+
+   ```sh
+   set -Ux GEMINI_API_KEY "…"     # fish
+   export GEMINI_API_KEY="…"      # bash/zsh — put it in your profile
+   ```
+
 ## 🎛️ Options
 
 | Flag | Does |
@@ -126,10 +138,7 @@ A local curation UI for turning key-notes into illustrated scenes:
 
 **How narration length works**: duration = word count ÷ speaking pace, and pace is a *property of the delivery*, not a setting — the dramatic style runs 75–102 wpm across takes (vs ~150 for plain speech). So the studio budgets words for your target (30 s ≈ 48 words), shows each take's measured duration against target, and the last ±10% is snapped exactly at video-assembly time with `ffmpeg -af atempo` (imperceptible). Aim a hair under; padding silence is free, cutting isn't.
 
-One-time setup:
-
-1. API key: [aistudio.google.com/apikey](https://aistudio.google.com/apikey) → `set -Ux GEMINI_API_KEY "…"` (fish) or export it in your shell
-2. Party portraits: one image per character in `avatars/`, filename = character name (`corvus.png` → "Corvus" in prompts)
+One-time setup: the [two prerequisites above](#-setup) (Gemini key + `claude` CLI), plus party portraits — one image per character in `avatars/`, filename = character name (`corvus.png` → "Corvus" in prompts).
 
 For unattended batch generation of a whole session, `uv run thoth.py --imagine sessions/key-notes-<ts>.md` does the same thing without the curation step.
 
