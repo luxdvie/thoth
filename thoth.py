@@ -136,7 +136,7 @@ NOTE_PROMPT = (
     "found a poison needle', say what the party is doing right now. The transcript "
     "is noisy speech-to-text; ignore garbled fragments. If nothing meaningfully new "
     "has happened since the previous post, output exactly SKIP. Output only the "
-    "sentence, no quotes.\n\nPrevious post: {prev}\n\nTranscript excerpt:\n{text}"
+    "sentence, no quotes.{glossary}\n\nPrevious post: {prev}\n\nTranscript excerpt:\n{text}"
 )
 
 
@@ -145,9 +145,26 @@ ENRICH_PROMPT = (
     "live session, and the raw speech-to-text transcript from those minutes (noisy; "
     "ignore garbled fragments). Write a vivid 2-4 sentence account of what actually "
     "happened — keep proper nouns, dice outcomes, decisions, and good table jokes. "
-    "Write in past tense. Output only the account, no headline, no quotes.\n\n"
+    "Write in past tense. Credit a named character only when the transcript makes "
+    "the actor unambiguous; otherwise credit 'the party' — misattribution is worse "
+    "than vagueness. Output only the account, no headline, no quotes.{glossary}\n\n"
     "Headline: {headline}\n\nTranscript:\n{text}"
 )
+
+
+GLOSSARY_CLAUSE = (
+    "\n\nGlossary — the source of truth for names, places, and spellings; the "
+    "speech-to-text mangles proper nouns, so silently correct any mishearing to "
+    "its glossary form:\n{glossary}"
+)
+
+
+def glossary_block(path: Path) -> str:
+    """The prompt clause for a user-maintained glossary file, or '' if absent."""
+    if not path.exists():
+        return ""
+    text = path.read_text().strip()
+    return GLOSSARY_CLAUSE.format(glossary=text) if text else ""
 STAMP_RE = re.compile(r"^(?:-|##)? ?\[(\d+):(\d\d):(\d\d)\] (.*)$")
 
 
@@ -160,7 +177,7 @@ def parse_stamped(path: Path) -> list[tuple[float, str]]:
     return rows
 
 
-def enrich(notes_path: Path, cmd: str, window: float) -> None:
+def enrich(notes_path: Path, cmd: str, window: float, glossary: str = "") -> None:
     """Expand each key-note headline into a rich paragraph, grounded in the
     transcript of its window. Prefers the polished transcript when present."""
     sid = notes_path.stem.removeprefix("key-notes-")
@@ -179,7 +196,7 @@ def enrich(notes_path: Path, cmd: str, window: float) -> None:
         excerpt = "\n".join(text for ts, text in transcript if t - 15 <= ts < min(t_end, t + window) + 15)
         result = subprocess.run(
             cmd, shell=True, capture_output=True, timeout=300,
-            input=ENRICH_PROMPT.format(headline=headline, text=excerpt).encode(),
+            input=ENRICH_PROMPT.format(headline=headline, text=excerpt, glossary=glossary).encode(),
         )
         body = result.stdout.decode().strip() if result.returncode == 0 else ""
         if not body:
@@ -290,12 +307,12 @@ ATTRIBUTE_PROMPT = (
     "at all.\n\n"
     "Now attribute these {n} numbered lines. Output EXACTLY {n} lines: line k is "
     "the speaker of input line k — a name from the cast, or '?'. No numbering, no "
-    "commentary, nothing else.\n\n{lines}"
+    "commentary, nothing else.{glossary}\n\n{lines}"
 )
 ATTRIBUTE_CHUNK = 120
 
 
-def attribute(transcript: Path, cast_path: Path, cmd: str) -> None:
+def attribute(transcript: Path, cast_path: Path, cmd: str, glossary: str = "") -> None:
     """Label each transcript line with a speaker via dialogue-context inference —
     the diarization that actually works on single-mic recordings."""
     if not cast_path.exists():
@@ -318,7 +335,7 @@ def attribute(transcript: Path, cast_path: Path, cmd: str) -> None:
             for (t, txt), lab in list(zip(rows, labels))[-12:]
         ) or "(session start)"
         lines = "\n".join(f"{j + 1}. {txt}" for j, (t, txt) in enumerate(block))
-        prompt = ATTRIBUTE_PROMPT.format(cast=cast, prev=prev, n=len(block), lines=lines)
+        prompt = ATTRIBUTE_PROMPT.format(cast=cast, prev=prev, n=len(block), lines=lines, glossary=glossary)
         got: list[str] = []
         for attempt in (1, 2, 3):
             try:
@@ -348,10 +365,11 @@ class NoteTaker:
     by piping a prompt into `cmd` (stdin → stdout) on a background thread, so the
     audio loop never blocks; completed notes are drained by the main loop."""
 
-    def __init__(self, path: Path, cmd: str, interval: float):
+    def __init__(self, path: Path, cmd: str, interval: float, glossary: str = ""):
         self.path = path
         self.cmd = cmd
         self.interval = interval
+        self.glossary = glossary
         self.last_t = 0.0
         self.mark = 0  # sentence index already summarized
         self.prev_note = "(none yet)"
@@ -376,7 +394,7 @@ class NoteTaker:
             try:
                 out = subprocess.run(
                     self.cmd, shell=True, capture_output=True, timeout=120,
-                    input=NOTE_PROMPT.format(prev=self.prev_note, text=text).encode(),
+                    input=NOTE_PROMPT.format(prev=self.prev_note, text=text, glossary=self.glossary).encode(),
                 )
                 note = out.stdout.decode().strip()
                 if out.returncode == 0 and note:
@@ -461,7 +479,7 @@ def polish(src: Path, model, rate: int, speakers: SpeakerLog | None) -> list[tup
     return rows
 
 
-def offline_notes(rows: list[tuple[float, int | None, str]], path: Path, cmd: str, interval: float) -> None:
+def offline_notes(rows: list[tuple[float, int | None, str]], path: Path, cmd: str, interval: float, glossary: str = "") -> None:
     """Key-notes for an already-transcribed session (--polish --notes): window the
     transcript by interval seconds and run the same summarizer as live --notes,
     synchronously — offline there's no audio loop to keep unblocked, and serial
@@ -482,7 +500,7 @@ def offline_notes(rows: list[tuple[float, int | None, str]], path: Path, cmd: st
     if cur:
         windows.append((t0, cur))
 
-    nt = NoteTaker(path, cmd, interval)
+    nt = NoteTaker(path, cmd, interval, glossary)
     for i, (t, texts) in enumerate(windows):
         print(f"\x1b[2K\rSummarizing window {i + 1}/{len(windows)} …", end="", file=sys.stderr, flush=True)
         nt._summarize(t, "\n".join(texts))
@@ -540,6 +558,7 @@ def main() -> None:
     parser.add_argument("--enrich", type=Path, default=None, metavar="KEYNOTES", help="Expand a key-notes file into rich paragraphs (key-notes-enriched-*.md) using its session transcript, and exit")
     parser.add_argument("--attribute", type=Path, default=None, metavar="TRANSCRIPT", help="Label speakers by dialogue context (LLM pass; works where --speakers can't) and exit")
     parser.add_argument("--cast", type=Path, default=Path("avatars/cast.md"), help="Cast list for --attribute: 'Name: how to recognize them' per line")
+    parser.add_argument("--glossary", type=Path, default=Path("avatars/glossary.md"), help="Campaign glossary (names, places, known mishearings) injected into notes/enrich/attribute prompts so garbled proper nouns get corrected")
     parser.add_argument("--imagine", type=Path, default=None, metavar="KEYNOTES", help="Generate a gallery image per key-note (Gemini API, needs GEMINI_API_KEY) and exit")
     parser.add_argument("--avatars", type=Path, default=Path("avatars"), help="Directory of character reference images for --imagine (default avatars/)")
     parser.add_argument("--image-model", default="gemini-2.5-flash-image", help="Gemini image model for --imagine (default: %(default)s)")
@@ -547,11 +566,12 @@ def main() -> None:
     parser.add_argument("--wav", type=Path, default=None, help=argparse.SUPPRESS)  # testing: 16k mono wav instead of mic
     args = parser.parse_args()
 
+    gloss = glossary_block(args.glossary)
     if args.enrich:  # no ASR model needed
-        enrich(args.enrich, args.notes_cmd, args.notes_interval * 1.5)
+        enrich(args.enrich, args.notes_cmd, args.notes_interval * 1.5, gloss)
         return
     if args.attribute:  # no ASR model needed
-        attribute(args.attribute, args.cast, args.notes_cmd)
+        attribute(args.attribute, args.cast, args.notes_cmd, gloss)
         return
     if args.imagine:  # no ASR model needed
         imagine(args.imagine, args.avatars, args.image_model, args.post_cmd)
@@ -571,7 +591,7 @@ def main() -> None:
         rows = polish(args.polish, model, rate, speakers)
         if args.notes:
             notes_path = args.polish.parent / f"key-notes-{args.polish.stem.removeprefix('session-')}.md"
-            offline_notes(rows, notes_path, args.notes_cmd, args.notes_interval)
+            offline_notes(rows, notes_path, args.notes_cmd, args.notes_interval, gloss)
         return
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -580,7 +600,7 @@ def main() -> None:
     recorder = WavWriter(args.out / f"{session}.wav", rate) if args.save_audio else None
     notes = None
     if args.notes:
-        notes = NoteTaker(args.out / f"key-notes-{session.removeprefix('session-')}.md", args.notes_cmd, args.notes_interval)
+        notes = NoteTaker(args.out / f"key-notes-{session.removeprefix('session-')}.md", args.notes_cmd, args.notes_interval, gloss)
 
     # Parakeet's streaming token timestamps are window-relative — once the cache
     # drops old frames they no longer reflect stream time (every stamp reads

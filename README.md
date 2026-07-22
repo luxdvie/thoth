@@ -57,6 +57,7 @@ Transcription needs **nothing** — no keys, no accounts, first run downloads th
 | `--polish AUDIO` | Re-transcribe a recording offline with full context — noticeably more accurate than the live pass. Add `--notes` to also distill a key-notes file from the recording |
 | `--attribute TRANSCRIPT` | 🗣️ Label speakers by dialogue context (LLM pass over the transcript + `avatars/cast.md`) — the diarization that actually works on one mic |
 | `--cast FILE` | Cast list for `--attribute` (default `avatars/cast.md`): `Name: how to recognize them` |
+| `--glossary FILE` | 📖 Campaign glossary (default `avatars/glossary.md`) injected into every notes/enrich/attribute prompt — speech-to-text mangles proper nouns ("Auril" → "Oh Reel"), and a small `Name: who/what, heard as '…'` file fixes them systematically. Grows with your campaign |
 | `--enrich KEYNOTES` | Expand a key-notes file into a rich chronicle (`key-notes-enriched-*.md`), grounded in the transcript |
 | `--imagine KEYNOTES` | 🎨 Generate a scene image per key-note into `gallery/<session>/`, with `avatars/` as character references (Gemini, needs `GEMINI_API_KEY`) |
 | `--post-cmd CMD` | Hook run per generated image (`<path>\n<caption>` on stdin) — wire it to a poster later |
@@ -149,6 +150,7 @@ For unattended batch generation of a whole session, `uv run thoth.py --imagine s
 - 🎬 **Session films** — feed 6 promoted gallery scenes into a [ComfyUI keyframe workflow](https://comfy.org/workflows/templates-6-key-frames-920c6926e747/) per clip, `ffmpeg concat` the clips into a session film
 - 📡 **Posting hooks** — `--post-cmd` (images) and `--notes-cmd` (headlines) are stdin→stdout shell contracts; point them at a social API or stream overlay when the time comes
 - 🎭 **Better diarization** — calibration phase (each player says a line at session start), stronger embedding models
+- 🪵 **Distill mode** — a stricter post-hoc log that routes each beat to in-world vs table-talk files and drops the noise ([#1](https://github.com/luxdvie/thoth/issues/1) — the glossary piece already landed as `--glossary`)
 
 ## 🧱 What it is (and isn't)
 

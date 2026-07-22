@@ -71,6 +71,33 @@ def test_offline_notes_survives_summarizer_failure(tmp: Path):
     assert not out.exists(), "failed windows must not write garbage"
 
 
+def test_glossary_reaches_summarizer_prompt(tmp: Path):
+    gpath = tmp / "glossary.md"
+    gpath.write_text("Auril: the Frostmaiden. Heard as 'Oh Reel'.\n")
+    out = tmp / "key-notes-x.md"
+    cap = tmp / "prompts.txt"
+    thoth.offline_notes(ROWS, out, f"tee -a {cap} | tail -n 1", 180, thoth.glossary_block(gpath))
+    prompts = cap.read_text()
+    assert "Oh Reel" in prompts, "glossary entries should be injected into the prompt"
+    assert "Glossary" in prompts, "glossary clause header missing"
+
+
+def test_missing_or_empty_glossary_adds_no_clause(tmp: Path):
+    assert thoth.glossary_block(tmp / "nope.md") == ""
+    empty = tmp / "empty.md"
+    empty.write_text("  \n")
+    assert thoth.glossary_block(empty) == ""
+    out = tmp / "key-notes-x.md"
+    cap = tmp / "prompts.txt"
+    thoth.offline_notes(ROWS, out, f"tee -a {cap} | tail -n 1", 180)
+    assert "Glossary" not in cap.read_text()
+
+
+def test_all_prompts_have_glossary_slot(tmp: Path):
+    for tpl in (thoth.NOTE_PROMPT, thoth.ENRICH_PROMPT, thoth.ATTRIBUTE_PROMPT):
+        assert "{glossary}" in tpl
+
+
 def test_live_notetaker_stamps_at_window_start(tmp: Path):
     out = tmp / "key-notes-x.md"
     nt = thoth.NoteTaker(out, "tail -n 1", 10)
