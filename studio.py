@@ -552,8 +552,7 @@ class LiveDirector:
         sid = self.sid
         notes = self._notes(sid)
         note = dict(notes[-1]) if notes else {"t": self._transcript_end(sid), "headline": "", "body": ""}
-        if job["source"] == "direct" or not notes:
-            note["t"] = self._transcript_end(sid)  # stamp manual/self-cut beats at "now"
+        note["t"] = self._transcript_end(sid)  # the director paints the last ~90 s, so stamp at "now"
         idx = max(len(notes) - 1, 0)
         cf = context_file(sid)
         context = cf.read_text().strip() if cf.exists() else ""
