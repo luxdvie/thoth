@@ -105,12 +105,14 @@ body.idle #tab,body.open #tab{opacity:0}
     <div id="err"></div>
   </div>
   <div>
-    <h3>Setting (persists between beats)</h3>
+    <h3>Setting — where the party is (pin it to override the director)</h3>
     <textarea id="context" placeholder="The director fills this in from the transcript; edit to pin the location."></textarea>
     <div class="row">
-      <button id="b-ctx">Save setting</button>
+      <button id="b-ctx" title="Save + pin: the director keeps this location until you unpin">Save &amp; pin</button>
+      <label class="toggle"><input type="checkbox" id="t-pin"> pinned</label>
       <label class="toggle"><input type="checkbox" id="t-auto"> auto-paint on new beats</label>
       <label class="toggle"><input type="checkbox" id="t-cont"> continuity</label>
+      <label class="toggle" id="discord-wrap"><input type="checkbox" id="t-discord"> post to Discord</label>
       <select id="model"></select>
     </div>
     <div class="hint">D drawer · F fullscreen · ← → browse · L back to live · Esc close</div>
@@ -159,6 +161,10 @@ function render() {
   $("#err").textContent = S.error || "";
   if (!S.sid) $("#emptymsg").textContent = "No session yet — start thoth with --notes.";
   else if (!h.length) $("#emptymsg").textContent = `Session ${S.sid} · trigger: ${S.trigger === "key-notes" ? "each new key-note" : "every " + S.beat + " s of transcript"} · awaiting the first beat… (D to direct one now)`;
+  $("#t-pin").checked = S.pinned;
+  $("#t-discord").checked = S.discord; $("#t-discord").disabled = !S.discord_ready;
+  $("#discord-wrap").title = S.discord_ready ? "" : "set THOTH_DISCORD_WEBHOOK to enable";
+  if (S.discord_error) $("#err").textContent = (S.error ? S.error + "\n" : "") + S.discord_error;
   $("#t-auto").checked = S.auto; $("#t-cont").checked = S.continuity;
   const sel = $("#model");
   if (!sel.options.length) for (const [id, lbl] of Object.entries(S.models)) sel.add(new Option(lbl, id));
@@ -191,7 +197,9 @@ async function poll() {
 async function direct(literal) {
   const direction = $("#direction").value.trim();
   if (literal && !direction) return;
-  try { await api("/api/live/direct", {direction, literal}); $("#direction").value = ""; viewIdx = null; }
+  const body = {direction, literal};
+  if (ctxDirty) body.context = $("#context").value;  // edited setting rides along — no separate save needed
+  try { await api("/api/live/direct", body); $("#direction").value = ""; ctxDirty = false; viewIdx = null; }
   catch (e) { $("#err").textContent = e.message; }
 }
 $("#b-direct").onclick = () => direct(false);
@@ -200,6 +208,8 @@ $("#b-now").onclick = () => { $("#direction").value = ""; direct(false); };
 $("#b-ctx").onclick = async () => { await api("/api/live/settings", {context: $("#context").value}); ctxDirty = false; };
 $("#context").oninput = () => ctxDirty = true;
 $("#t-auto").onchange = e => api("/api/live/settings", {auto: e.target.checked});
+$("#t-discord").onchange = e => api("/api/live/settings", {discord: e.target.checked});
+$("#t-pin").onchange = e => api("/api/live/settings", {pinned: e.target.checked});
 $("#t-cont").onchange = e => api("/api/live/settings", {continuity: e.target.checked});
 $("#model").onchange = e => api("/api/live/settings", {model: e.target.value});
 $("#tab").onclick = () => document.body.classList.add("open");

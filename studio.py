@@ -111,15 +111,20 @@ ELABORATE_PROMPT = (
     "what each named character ({names}) is doing and where they are in frame, and "
     "the mood of the instant. The setting below is already established separately — "
     "do NOT restate it, only the action within it. Under 130 words. Output only the "
-    "scene description.\n\nSetting (already established): {context}\n\n"
+    "scene description.{canon}\n\nSetting (already established): {context}\n\n"
     "Headline: {headline}\n\nAccount: {body}"
 )
 
 COMMAND_PROMPT = (
     "Illustrate this moment from a D&D campaign as a single dramatic fantasy scene. "
     "The attached reference images are the party's characters, in order: {names}. "
-    "Keep their faces, builds, and gear recognizable. Cinematic lighting, painterly "
-    "fantasy illustration style, no text or borders in the image."
+    "IDENTITY LOCK: each character's face, head shape, skin, species, and body "
+    "proportions must match their reference image exactly — the references override "
+    "any wording below. Never blend a party member with a creature in the scene "
+    "(kobolds, beasts, monsters) and never add snouts, horns, tails, or fur they "
+    "don't have in their reference. Keep their builds and gear recognizable. "
+    "Cinematic lighting, painterly fantasy illustration style. No text, names, "
+    "labels, lettering, or borders anywhere in the image."
 )
 CONTINUITY_PROMPT = (
     "The FINAL attached image is the previous keyframe of this sequence — maintain "
@@ -137,6 +142,25 @@ STAGE_PROMPT = (
     "this stretch. 3-5 sentences, present tense, purely visual and physical facts, "
     "no plot summary. Output only the description.\n\nTranscript:\n{text}"
 )
+
+
+CANON_CLAUSE = (
+    "\n\nCharacter canon — the source of truth for how each character looks and "
+    "what they own. Every feature, mark, item, and power belongs ONLY to the "
+    "character whose canon lists it: when the transcript mentions one (\"my "
+    "tattoo\", \"the crystal\", \"the scarf\"), attribute it to its owner here, never "
+    "to whoever is nearby in the scene, and never give a character a feature their "
+    "canon doesn't have. Use the canon to make descriptions specific (exact "
+    "garments, weapon, colors). Before answering, check every attribution against "
+    "it.\n{sheets}"
+)
+
+
+def canon_block(names: list[str]) -> str:
+    """avatars/sheets/<Name>.md dossiers for the given characters (empty if none)."""
+    sheets = [(AVATARS / "sheets" / f"{n}.md") for n in names]
+    text = "\n\n".join(p.read_text().strip() for p in sheets if p.exists())
+    return CANON_CLAUSE.format(sheets=text) if text else ""
 
 
 def read_bible(name: str) -> dict[str, str]:
@@ -263,6 +287,44 @@ def load_state() -> dict:
             "models": MODELS, "model": IMAGE_MODEL, "voices": VOICES, "aspects": ASPECTS}
 
 
+def discord_webhook() -> str:
+    """THOTH_DISCORD_WEBHOOK (env, or fish universal var like the Gemini key). '' = posting off."""
+    if url := os.environ.get("THOTH_DISCORD_WEBHOOK"):
+        return url
+    try:
+        import subprocess
+        return subprocess.run(["fish", "-c", "echo -n $THOTH_DISCORD_WEBHOOK"],
+                              capture_output=True, timeout=5).stdout.decode().strip()
+    except Exception:
+        return ""
+
+
+def discord_post(png: Path, caption: str) -> None:
+    """Upload one image + caption to the webhook's channel (multipart, stdlib only)."""
+    url = discord_webhook()
+    if not url:
+        raise RuntimeError("THOTH_DISCORD_WEBHOOK is not set")
+    boundary = f"thoth{int(time.time() * 1000)}"
+    payload = json.dumps({"content": caption[:1900], "username": "thoth",
+                          "allowed_mentions": {"parse": []}})
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
+            f"Content-Type: application/json\r\n\r\n{payload}\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"{png.name}\"\r\n"
+            f"Content-Type: image/png\r\n\r\n").encode() + png.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(url, data=body, headers={
+        "Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": "thoth (local, 1.0)"})
+    err = ""
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(req, timeout=60):
+                return
+        except Exception as e:
+            err = getattr(e, "read", lambda: b"")()[-300:].decode(errors="replace") or str(e)
+        if attempt == 1:
+            time.sleep(5)
+    raise RuntimeError(f"discord: {err}")
+
+
 def api_key() -> str:
     if key := os.environ.get("GEMINI_API_KEY"):
         return key
@@ -322,22 +384,28 @@ def gemini_generate(prompt: str, avatar_names: list[str], model: str,
 
 LIVE_CAST = [n.strip() for n in os.environ.get("THOTH_LIVE_CAST", "Corvus,Punchy,Stone").split(",") if n.strip()]
 LIVE_MODEL = os.environ.get("THOTH_LIVE_MODEL", IMAGE_MODEL)
-LIVE_WINDOW = 240  # seconds of transcript the director reads per beat
-LIVE_BEAT = float(os.environ.get("THOTH_LIVE_BEAT", 180))  # no key-notes file? self-trigger every N s of transcript
+LIVE_WINDOW = float(os.environ.get("THOTH_LIVE_WINDOW", 900))  # seconds of transcript the director reads per beat
+LIVE_CHARS = 30000  # cap on that excerpt (newest kept) — haiku reads it in ~10 s
+LIVE_BEAT = float(os.environ.get("THOTH_LIVE_BEAT", 90))  # paint at least every N s of transcript, key-note or not
 
 DIRECTOR_PROMPT = (
     "You are the art director for a LIVE illustrated D&D session — each beat you "
     "paint becomes the image on the table's display. The party in every image: "
-    "{names}. Below: the current established setting, the latest live headline, "
-    "and the last few minutes of noisy speech-to-text (ignore garble and "
-    "out-of-game chatter).{direction}\n\nReturn exactly three sections:\n"
+    "{names}. Below: the story so far (the session's key-notes), what you already "
+    "painted recently, the current established setting, and the last ~15 minutes "
+    "of noisy timestamped speech-to-text (ignore garble and out-of-game chatter). "
+    "Use the older material to stay in sync — who is present, where they are, what "
+    "they carry, what just happened — but paint what is happening at the END of the "
+    "transcript (the last ~90 seconds). Don't repaint a moment already painted "
+    "unless nothing new happened; advance the story.{direction}\n\nReturn exactly three sections:\n"
     "HEADLINE: one caption line, at most 12 words, present tense — what is happening.\n"
     "CONTEXT: 2-4 sentences of persistent physical staging — location, "
     "environment, time of day, weather, NPCs present (with a brief visual "
     "descriptor). Keep the established setting unless the story clearly moved.\n"
     "SCENE: under 120 words — the single strongest instant of action right now: "
     "composition and camera angle, what each of {names} is doing and where they "
-    "are in frame, mood. Purely visual.{glossary}\n\n"
+    "are in frame, mood. Purely visual.{glossary}{canon}\n\n"
+    "Story so far:\n{story}\n\nRecently painted:\n{painted}\n\n"
     "Established setting: {context}\n\nLatest headline: {headline}\n\n"
     "Transcript:\n{text}"
 )
@@ -377,6 +445,10 @@ class LiveDirector:
         self.lock = threading.Condition()
         self.auto = auto
         self.continuity = True
+        self.discord = bool(discord_webhook())  # auto-post each frame when a webhook is configured
+        self.discord_error = ""
+        self.fresh_setting = False  # GM just changed the setting: skip continuity once
+        self.pinned = False  # GM-saved setting: director may not rewrite it (and continuity resets on change)
         self.model = LIVE_MODEL
         self.cast = [n for n in LIVE_CAST if self._avatar(n)]
         self.sid: str | None = None
@@ -417,16 +489,17 @@ class LiveDirector:
                         self.history = self._load_history(sid)
                         self.seen_notes = len(self._notes(sid))
                         self.last_beat_t = self._transcript_end(sid)
+                        self.pinned = (SESSIONS / f"context-{sid}.pinned").exists()
                     if self.sid:
                         fire = False
-                        if (SESSIONS / f"key-notes-{self.sid}.md").exists():
-                            notes = self._notes(self.sid)
-                            if len(notes) > self.seen_notes:
-                                self.seen_notes, fire = len(notes), True
-                        else:  # thoth ran without --notes: cut our own beats on transcript time
-                            end = self._transcript_end(self.sid)
-                            if end - self.last_beat_t >= LIVE_BEAT or (not self.history and end >= 45 and self.last_beat_t == 0):
-                                self.last_beat_t, fire = end, True
+                        notes = self._notes(self.sid)
+                        if len(notes) > self.seen_notes:  # a key-note = something new happened
+                            self.seen_notes, fire = len(notes), True
+                        end = self._transcript_end(self.sid)
+                        if end - self.last_beat_t >= LIVE_BEAT:  # …and never go stale between notes
+                            fire = True
+                        if fire:
+                            self.last_beat_t = end
                         if fire and self.auto and (not self.pending or self.pending["source"] == "auto"):
                             self.pending = {"source": "auto", "direction": ""}
                             self.lock.notify_all()
@@ -440,10 +513,25 @@ class LiveDirector:
         rows = parse_stamped_lines(p) if p.exists() else []
         return rows[-1][0] if rows else 0.0
 
-    def request(self, direction: str, literal: bool) -> None:
+    def set_context(self, text: str) -> None:
+        if self.sid:
+            context_file(self.sid).write_text(text.strip())
+            self._set_pinned(bool(text.strip()))
+            self.fresh_setting = True
+
+    def _set_pinned(self, on: bool) -> None:
+        self.pinned = on
+        if self.sid:  # marker file so a stage restart keeps the GM's pin
+            marker = SESSIONS / f"context-{self.sid}.pinned"
+            marker.touch() if on else marker.unlink(missing_ok=True)
+
+    def request(self, direction: str, literal: bool, context: str | None = None) -> None:
         with self.lock:
             if not self.sid:
                 raise RuntimeError("no session found in sessions/ — start thoth first")
+            if context is not None:
+                self.set_context(context)
+            self.last_beat_t = self._transcript_end(self.sid)  # a GM paint resets the auto cadence
             self.pending = {"source": "direct", "direction": direction.strip(), "literal": literal}
             self.lock.notify_all()
 
@@ -478,20 +566,27 @@ class LiveDirector:
             transcript = SESSIONS / f"session-{sid}.md"
             rows = parse_stamped_lines(transcript) if transcript.exists() else []
             end = rows[-1][0] if rows else 0
-            text = "\n".join(t for ts, t in rows if ts >= end - LIVE_WINDOW)[-8000:]
+            text = "\n".join(f"{stamp(ts)} {t}" for ts, t in rows if ts >= end - LIVE_WINDOW)[-LIVE_CHARS:]
+            story = "\n".join(f"{stamp(n['t'])} {n['headline']}" for n in notes) or "(none yet)"
+            painted = "\n".join(f"- {h.get('headline', '')}" for h in self.history[-4:]) or "(nothing yet)"
             gloss = AVATARS / "glossary.md"
             out = run_notes_cmd(DIRECTOR_PROMPT.format(
                 names=", ".join(self.cast),
                 direction=DIRECTION_CLAUSE.format(direction=job["direction"]) if job["direction"] else "",
                 glossary=("\n\nGlossary (correct spellings):\n" + gloss.read_text().strip()) if gloss.exists() else "",
-                context=context or "(none yet — infer it)",
+                context=(context + "\n(PINNED by the game master — this is where the party IS now; "
+                         "return it unchanged as CONTEXT, ignore older locations in the transcript)")
+                        if self.pinned and context else context or "(none yet — infer it)",
                 headline=note["headline"] or "(none yet)",
-                text=text or "(no transcript yet)",
-            ))
+                text=text or "(no transcript yet)", story=story, painted=painted,
+                canon=canon_block(self.cast),
+            ), timeout=180)
             out = out.replace("**", "").replace("__", "")  # haiku likes markdown-bolding section labels
             m = re.search(r"CONTEXT:\s*(.*?)\s*SCENE:\s*(.*)", out, re.S | re.I)
             if m:
-                context, scene = m.group(1).strip(), m.group(2).strip()
+                scene = m.group(2).strip()
+                if not self.pinned:
+                    context = m.group(1).strip()
             else:
                 scene = out
             if h := re.search(r"HEADLINE:\s*(.+)", out, re.I):
@@ -500,11 +595,16 @@ class LiveDirector:
 
         self.status = "painting"
         cont_path = None
-        if self.continuity and prev:
+        # continuity anchors palette AND place — feeding the old location's frame after a
+        # setting change drags the party back there (field bug: stuck in the mine in town)
+        # (only on a GM setting change — the director rewords CONTEXT every beat, so a
+        # text-equality check silently disabled continuity for every auto frame)
+        if self.continuity and prev and not self.fresh_setting:
             p = STAGING / sid / Path(prev["url"]).name
             cont_path = p if p.is_file() else None
         prompt = build_prompt(context, scene, self.cast, cont_path is not None)
         png = gemini_generate(prompt, self.cast, self.model, "16:9", cont_path)
+        self.fresh_setting = False
         dest_dir = STAGING / sid
         dest_dir.mkdir(parents=True, exist_ok=True)
         serial = len(list(dest_dir.glob(f"{idx:03d}-*.png")))
@@ -517,12 +617,25 @@ class LiveDirector:
         dest.with_suffix(".json").write_text(json.dumps(meta, indent=2))
         with self.lock:
             self.history.append({"url": f"/generated/{sid}/{dest.name}", **meta})
+        if self.discord:  # off the worker thread: a slow Discord never delays the next frame
+            caption = f"**{meta['stamp']}** {meta['headline']}".strip()
+            if job["source"] == "direct" and job["direction"]:
+                caption += f"\n> *{job['direction'][:300]}*"
+            threading.Thread(target=self._post, args=(dest, caption), daemon=True).start()
+
+    def _post(self, png: Path, caption: str) -> None:
+        try:
+            discord_post(png, caption)
+            self.discord_error = ""
+        except Exception as e:
+            self.discord_error = str(e)[:300]
 
     def state(self) -> dict:
         cf = context_file(self.sid) if self.sid else None
         notes = self._notes(self.sid) if self.sid else []
         return {
-            "sid": self.sid, "auto": self.auto, "continuity": self.continuity, "model": self.model,
+            "sid": self.sid, "auto": self.auto, "continuity": self.continuity, "pinned": self.pinned, "model": self.model,
+            "discord": self.discord, "discord_ready": bool(discord_webhook()), "discord_error": self.discord_error,
             "models": MODELS, "cast": self.cast, "status": self.status, "error": self.error,
             "queued": bool(self.pending), "notes": len(notes), "beat": LIVE_BEAT,
             "trigger": "key-notes" if self.sid and (SESSIONS / f"key-notes-{self.sid}.md").exists() else "transcript",
@@ -590,7 +703,7 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0)) or b"{}"))
         try:
             if self.path == "/api/live/direct":
-                DIRECTOR.request(payload.get("direction", ""), bool(payload.get("literal")))
+                DIRECTOR.request(payload.get("direction", ""), bool(payload.get("literal")), payload.get("context"))
                 self._send(200, b"{}")
             elif self.path == "/api/live/settings":
                 for k in ("auto", "continuity"):
@@ -598,8 +711,12 @@ class Handler(BaseHTTPRequestHandler):
                         setattr(DIRECTOR, k, bool(payload[k]))
                 if payload.get("model") in MODELS:
                     DIRECTOR.model = payload["model"]
-                if "context" in payload and DIRECTOR.sid:
-                    context_file(DIRECTOR.sid).write_text(payload["context"])
+                if "context" in payload:
+                    DIRECTOR.set_context(payload["context"])
+                if "discord" in payload:
+                    DIRECTOR.discord = bool(payload["discord"]) and bool(discord_webhook())
+                if "pinned" in payload:
+                    DIRECTOR._set_pinned(bool(payload["pinned"]))
                 self._send(200, json.dumps(DIRECTOR.state()).encode())
             elif self.path == "/api/generate":
                 sid, idx = payload["sid"], int(payload["idx"])
@@ -690,6 +807,7 @@ class Handler(BaseHTTPRequestHandler):
                 import subprocess
                 prompt = ELABORATE_PROMPT.format(
                     names=", ".join(payload.get("avatars", [])),
+                    canon=canon_block(payload.get("avatars", [])),
                     context=payload.get("context", "") or "(none)",
                     headline=payload.get("headline", ""), body=payload.get("body", "") or "(none)",
                 )
@@ -723,6 +841,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="thoth studio — curation UI + live stage")
     ap.add_argument("--live", action="store_true",
                     help=f"auto-paint {', '.join(LIVE_CAST)} on every new key-note of the running session; opens /live")
+    ap.add_argument("--no-open", action="store_true", help="don't open a browser tab (restarts under a running stage)")
     args = ap.parse_args()
     if not SESSIONS.is_dir():
         sys.exit("run from the thoth repo (no sessions/ here)")
@@ -733,7 +852,8 @@ def main() -> None:
     print(f"𓅝 thoth studio → http://localhost:{PORT}   live stage → http://localhost:{PORT}/live  (Ctrl-C to stop)")
     if args.live:
         print(f"   auto-paint ON · cast {', '.join(DIRECTOR.cast)} · {DIRECTOR.model}")
-    threading.Timer(0.4, lambda: webbrowser.open(f"http://localhost:{PORT}{page}")).start()
+    if not args.no_open:
+        threading.Timer(0.4, lambda: webbrowser.open(f"http://localhost:{PORT}{page}")).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
