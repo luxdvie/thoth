@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>𓅝 thoth · live stage</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Cormorant+Garamond:ital,wght@0,500;0,600;1,500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#0d0b07; --ink2:#151109; --ink3:#1e1810;
+  --parchment:#efe3c8; --parchment-dim:#b9a982;
+  --gold:#d0a94e; --gold-hi:#f0cd7e; --oxblood:#8c3a2e; --verdigris:#4e8f7b;
+  --hairline:rgba(208,169,78,.22);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:#000;color:var(--parchment);overflow:hidden}
+body{font-family:"Cormorant Garamond",serif;font-size:17px;cursor:default}
+body.idle{cursor:none}
+
+/* ── the stage: two stacked frames, crossfaded ── */
+.frame{position:fixed;inset:0;background:#000 center/contain no-repeat;opacity:0;transition:opacity 2.4s ease}
+.frame.on{opacity:1}
+.frame.kb{animation:drift 60s ease-in-out infinite alternate}
+@keyframes drift{from{transform:scale(1)}to{transform:scale(1.045) translate(-.6%,-.4%)}}
+#vignette{position:fixed;inset:0;pointer-events:none;
+  background:radial-gradient(ellipse at center,transparent 55%,rgba(0,0,0,.55) 100%),
+             linear-gradient(to top,rgba(0,0,0,.75),transparent 26%)}
+
+#empty{position:fixed;inset:0;display:grid;place-items:center;text-align:center;color:var(--parchment-dim)}
+#empty h1{font-family:Cinzel;font-weight:500;letter-spacing:.3em;color:var(--gold);font-size:28px;margin-bottom:14px}
+#empty p{font-style:italic;font-size:20px}
+
+/* ── caption ── */
+#caption{position:fixed;left:48px;bottom:40px;right:40%;transition:opacity .8s}
+#caption .stamp{font-family:"JetBrains Mono";font-size:13px;color:var(--gold);letter-spacing:.12em;margin-bottom:6px}
+#caption .head{font-family:Cinzel;font-weight:500;font-size:clamp(20px,2.1vw,34px);line-height:1.2;
+  text-shadow:0 2px 18px #000,0 0 3px #000}
+#caption .src{font-style:italic;color:var(--parchment-dim);font-size:16px;margin-top:6px;text-shadow:0 1px 8px #000}
+
+/* ── status pip ── */
+#pip{position:fixed;top:20px;right:24px;display:flex;gap:10px;align-items:center;
+  font-family:"JetBrains Mono";font-size:12px;letter-spacing:.1em;color:var(--parchment-dim);
+  background:rgba(13,11,7,.55);padding:7px 12px;border:1px solid var(--hairline);border-radius:2px;
+  transition:opacity .8s}
+#pip i{width:8px;height:8px;border-radius:50%;background:var(--parchment-dim)}
+#pip.directing i{background:var(--gold);animation:pulse 1s infinite}
+#pip.painting i{background:var(--gold-hi);animation:pulse .6s infinite}
+#pip.error i{background:var(--oxblood)}
+#pip.auto-off{opacity:.8}
+@keyframes pulse{50%{opacity:.25}}
+body.idle #pip.idle-ok{opacity:0}
+
+/* ── control drawer ── */
+#drawer{position:fixed;left:0;right:0;bottom:0;transform:translateY(100%);transition:transform .35s ease;
+  background:linear-gradient(to top,rgba(13,11,7,.97),rgba(13,11,7,.92));border-top:1px solid var(--hairline);
+  padding:18px 28px 20px;display:grid;grid-template-columns:1.3fr 1fr;gap:20px 28px;max-height:70vh;overflow:auto}
+body.open #drawer{transform:none}
+body.open #caption{opacity:0}
+#drawer h3{font-family:Cinzel;font-size:12px;letter-spacing:.25em;color:var(--gold);font-weight:500;margin-bottom:8px}
+textarea{width:100%;background:var(--ink3);color:var(--parchment);border:1px solid var(--hairline);
+  font:inherit;font-size:17px;padding:10px 12px;resize:vertical;border-radius:2px}
+textarea:focus{outline:1px solid var(--gold)}
+#direction{height:76px}
+#context{height:96px;font-size:15px}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:center}
+button,select{font-family:Cinzel;font-size:12px;letter-spacing:.14em;background:var(--ink3);color:var(--parchment);
+  border:1px solid var(--hairline);padding:8px 14px;cursor:pointer;border-radius:2px}
+button:hover{border-color:var(--gold);color:var(--gold-hi)}
+button.primary{background:var(--gold);color:var(--ink);border-color:var(--gold)}
+button.primary:hover{background:var(--gold-hi);color:var(--ink)}
+.toggle{display:flex;gap:6px;align-items:center;font-family:"JetBrains Mono";font-size:12px;color:var(--parchment-dim);cursor:pointer}
+.toggle input{accent-color:var(--gold)}
+.hint{font-family:"JetBrains Mono";font-size:11px;color:var(--parchment-dim);opacity:.7;margin-top:8px}
+#err{color:#e08a7c;font-family:"JetBrains Mono";font-size:12px;margin-top:8px;white-space:pre-wrap}
+#strip{grid-column:1/-1;display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}
+#strip img{height:72px;aspect-ratio:16/9;object-fit:cover;border:1px solid var(--hairline);cursor:pointer;opacity:.7;flex:none}
+#strip img:hover{opacity:1}
+#strip img.cur{border-color:var(--gold);opacity:1}
+#tab{position:fixed;bottom:0;left:50%;transform:translateX(-50%);font-family:Cinzel;font-size:11px;letter-spacing:.25em;
+  color:var(--parchment-dim);padding:5px 16px;background:rgba(13,11,7,.6);border:1px solid var(--hairline);border-bottom:0;
+  cursor:pointer;transition:opacity .8s}
+body.idle #tab,body.open #tab{opacity:0}
+</style>
+</head>
+<body>
+<div class="frame" id="f0"></div>
+<div class="frame" id="f1"></div>
+<div id="vignette"></div>
+<div id="empty"><div><h1>𓅝 THE STAGE AWAITS</h1><p id="emptymsg">Listening for the first beat of the session…</p></div></div>
+
+<div id="caption"><div class="stamp" id="cstamp"></div><div class="head" id="chead"></div><div class="src" id="csrc"></div></div>
+<div id="pip"><i></i><span id="ptext">…</span></div>
+<div id="tab">DIRECT · D</div>
+
+<div id="drawer">
+  <div>
+    <h3>Direct the next image</h3>
+    <textarea id="direction" placeholder="e.g. Stone hurls the yeti off the cliff while Corvus reels in a glowing fish and Punchy cheers — blizzard, dusk"></textarea>
+    <div class="row">
+      <button class="primary" id="b-direct" title="Director blends your note with the live transcript (Ctrl/⌘+Enter)">Direct</button>
+      <button id="b-literal" title="Paint exactly what you wrote as the scene, current setting kept">Paint verbatim</button>
+      <button id="b-now" title="Repaint from the current transcript, no direction">Repaint now</button>
+    </div>
+    <div id="err"></div>
+  </div>
+  <div>
+    <h3>Setting (persists between beats)</h3>
+    <textarea id="context" placeholder="The director fills this in from the transcript; edit to pin the location."></textarea>
+    <div class="row">
+      <button id="b-ctx">Save setting</button>
+      <label class="toggle"><input type="checkbox" id="t-auto"> auto-paint on new beats</label>
+      <label class="toggle"><input type="checkbox" id="t-cont"> continuity</label>
+      <select id="model"></select>
+    </div>
+    <div class="hint">D drawer · F fullscreen · ← → browse · L back to live · Esc close</div>
+  </div>
+  <div id="strip"></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let S = null, shownUrl = null, front = 0, viewIdx = null; // viewIdx null = follow live
+let ctxDirty = false;
+
+async function api(path, body) {
+  const r = await fetch(path, body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+}
+
+function show(item) {
+  if (!item) return;
+  $("#empty").style.display = "none";
+  $("#cstamp").textContent = item.stamp || "";
+  $("#chead").textContent = item.headline || "";
+  $("#csrc").textContent = item.source === "direct" && item.direction ? "“" + item.direction + "”" : "";
+  if (item.url === shownUrl) return;
+  const img = new Image();
+  img.onload = () => {
+    const next = document.getElementById("f" + (1 - front)), cur = document.getElementById("f" + front);
+    next.classList.remove("kb"); void next.offsetWidth;
+    next.style.backgroundImage = `url("${item.url}")`;
+    next.classList.add("on", "kb"); cur.classList.remove("on");
+    front = 1 - front; shownUrl = item.url;
+  };
+  img.src = item.url;
+}
+
+function render() {
+  const h = S.history;
+  const pip = $("#pip");
+  pip.className = S.error ? "error" : S.status;
+  if (!S.auto) pip.classList.add("auto-off");
+  if (!S.error && S.status === "idle" && S.auto) pip.classList.add("idle-ok");
+  const label = {idle: S.auto ? "LIVE · AUTO" : "LIVE · MANUAL", directing: "DIRECTING…", painting: "PAINTING…"}[S.status] || S.status;
+  $("#ptext").textContent = (S.error ? "ERROR · " : "") + label + (S.queued ? " · +1 QUEUED" : "");
+  $("#err").textContent = S.error || "";
+  if (!S.sid) $("#emptymsg").textContent = "No session yet — start thoth with --notes.";
+  else if (!h.length) $("#emptymsg").textContent = `Session ${S.sid} · trigger: ${S.trigger === "key-notes" ? "each new key-note" : "every " + S.beat + " s of transcript"} · awaiting the first beat… (D to direct one now)`;
+  $("#t-auto").checked = S.auto; $("#t-cont").checked = S.continuity;
+  const sel = $("#model");
+  if (!sel.options.length) for (const [id, lbl] of Object.entries(S.models)) sel.add(new Option(lbl, id));
+  sel.value = S.model;
+  if (!ctxDirty && document.activeElement !== $("#context")) $("#context").value = S.context;
+  const strip = $("#strip");
+  if (strip.childElementCount !== h.length) {
+    strip.innerHTML = "";
+    h.forEach((it, i) => {
+      const im = document.createElement("img");
+      im.src = it.url; im.title = `${it.stamp} ${it.headline}`;
+      im.onclick = () => { viewIdx = i === h.length - 1 ? null : i; show(h[i]); markStrip(); };
+      strip.append(im);
+    });
+    strip.scrollLeft = strip.scrollWidth;
+  }
+  if (viewIdx === null && h.length) show(h[h.length - 1]);
+  markStrip();
+}
+function markStrip() {
+  const cur = viewIdx ?? S.history.length - 1;
+  [...$("#strip").children].forEach((im, i) => im.classList.toggle("cur", i === cur));
+}
+
+async function poll() {
+  try { S = await api("/api/live"); render(); } catch (e) { $("#ptext").textContent = "SERVER OFFLINE"; $("#pip").className = "error"; }
+  setTimeout(poll, 2000);
+}
+
+async function direct(literal) {
+  const direction = $("#direction").value.trim();
+  if (literal && !direction) return;
+  try { await api("/api/live/direct", {direction, literal}); $("#direction").value = ""; viewIdx = null; }
+  catch (e) { $("#err").textContent = e.message; }
+}
+$("#b-direct").onclick = () => direct(false);
+$("#b-literal").onclick = () => direct(true);
+$("#b-now").onclick = () => { $("#direction").value = ""; direct(false); };
+$("#b-ctx").onclick = async () => { await api("/api/live/settings", {context: $("#context").value}); ctxDirty = false; };
+$("#context").oninput = () => ctxDirty = true;
+$("#t-auto").onchange = e => api("/api/live/settings", {auto: e.target.checked});
+$("#t-cont").onchange = e => api("/api/live/settings", {continuity: e.target.checked});
+$("#model").onchange = e => api("/api/live/settings", {model: e.target.value});
+$("#tab").onclick = () => document.body.classList.add("open");
+$("#direction").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); direct(false); } };
+
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") { if (e.key === "Escape") e.target.blur(); return; }
+  const h = S?.history || [];
+  if (e.key === "d" || e.key === "D") { document.body.classList.toggle("open"); if (document.body.classList.contains("open")) $("#direction").focus(); e.preventDefault(); }
+  else if (e.key === "Escape") document.body.classList.remove("open");
+  else if (e.key === "f" || e.key === "F") document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+  else if (e.key === "ArrowLeft" && h.length) { viewIdx = Math.max(0, (viewIdx ?? h.length - 1) - 1); show(h[viewIdx]); markStrip(); }
+  else if (e.key === "ArrowRight" && h.length) { viewIdx = (viewIdx ?? h.length - 1) + 1; if (viewIdx >= h.length - 1) viewIdx = null; show(h[viewIdx ?? h.length - 1]); markStrip(); }
+  else if (e.key === "l" || e.key === "L") { viewIdx = null; if (h.length) show(h[h.length - 1]); markStrip(); }
+});
+
+let idleT;
+document.addEventListener("mousemove", () => { document.body.classList.remove("idle"); clearTimeout(idleT); idleT = setTimeout(() => document.body.classList.add("idle"), 3000); });
+poll();
+</script>
+</body>
+</html>

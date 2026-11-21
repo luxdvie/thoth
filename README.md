@@ -145,6 +145,19 @@ One-time setup: the [two prerequisites above](#-setup) (Gemini key + `claude` CL
 
 For unattended batch generation of a whole session, `uv run thoth.py --imagine sessions/key-notes-<ts>.md` does the same thing without the curation step.
 
+## 📺 Live stage
+
+Put the session on a second monitor as it happens:
+
+```sh
+uv run thoth.py --save-audio --notes   # terminal 1: the scribe
+uv run studio.py --live                # terminal 2: opens http://localhost:8511/live — press F
+```
+
+Every new key-note (thoth only writes one when something new happened) cues a director pass (Haiku reads the last 4 min of transcript → persistent **setting** + **scene** + caption), then Nano Banana Pro paints the party with their reference portraits and the previous frame for continuity, crossfading onto the stage. No `--notes`? It self-cuts a beat every 180 s of transcript. Expect a new image every 3–6 min, lagging the table by ~3–4 min, ~13¢ each.
+
+Press **D** to direct: type a moment and **⌘+Enter** (blended with the transcript), **Paint verbatim**, or **Repaint now**; pin the location in **Setting**; toggle auto/continuity/model. **← →** browse, **L** back to live. Frames land in `generated-images/<session>/` keyed to their note, so the studio can promote them. Cast via `THOTH_LIVE_CAST` (default `Corvus,Punchy,Stone`), cadence via `THOTH_LIVE_BEAT`.
+
 ## 🗺️ Roadmap
 
 - 🎬 **Session films** — feed 6 promoted gallery scenes into a [ComfyUI keyframe workflow](https://comfy.org/workflows/templates-6-key-frames-920c6926e747/) per clip, `ffmpeg concat` the clips into a session film

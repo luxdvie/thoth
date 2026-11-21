@@ -318,6 +318,224 @@ def gemini_generate(prompt: str, avatar_names: list[str], model: str,
     raise RuntimeError(err)
 
 
+# ── live stage: auto-illustrate the running session (second-monitor view at /live) ──
+
+LIVE_CAST = [n.strip() for n in os.environ.get("THOTH_LIVE_CAST", "Corvus,Punchy,Stone").split(",") if n.strip()]
+LIVE_MODEL = os.environ.get("THOTH_LIVE_MODEL", IMAGE_MODEL)
+LIVE_WINDOW = 240  # seconds of transcript the director reads per beat
+LIVE_BEAT = float(os.environ.get("THOTH_LIVE_BEAT", 180))  # no key-notes file? self-trigger every N s of transcript
+
+DIRECTOR_PROMPT = (
+    "You are the art director for a LIVE illustrated D&D session — each beat you "
+    "paint becomes the image on the table's display. The party in every image: "
+    "{names}. Below: the current established setting, the latest live headline, "
+    "and the last few minutes of noisy speech-to-text (ignore garble and "
+    "out-of-game chatter).{direction}\n\nReturn exactly three sections:\n"
+    "HEADLINE: one caption line, at most 12 words, present tense — what is happening.\n"
+    "CONTEXT: 2-4 sentences of persistent physical staging — location, "
+    "environment, time of day, weather, NPCs present (with a brief visual "
+    "descriptor). Keep the established setting unless the story clearly moved.\n"
+    "SCENE: under 120 words — the single strongest instant of action right now: "
+    "composition and camera angle, what each of {names} is doing and where they "
+    "are in frame, mood. Purely visual.{glossary}\n\n"
+    "Established setting: {context}\n\nLatest headline: {headline}\n\n"
+    "Transcript:\n{text}"
+)
+DIRECTION_CLAUSE = (
+    "\n\nThe game master has given a DIRECTION for this image — it overrides "
+    "everything else, follow it exactly: {direction}"
+)
+
+
+def live_session() -> str | None:
+    """Newest live transcript (session-<sid>.md, not a polished/attributed derivative)."""
+    cands = [p for p in SESSIONS.glob("session-*.md")
+             if re.fullmatch(r"session-\d{4}-\d\d-\d\d-\d{4}", p.stem)]
+    if not cands:
+        return None
+    return max(cands, key=lambda p: p.stat().st_mtime).stem.removeprefix("session-")
+
+
+def run_notes_cmd(prompt: str, timeout: int = 120) -> str:
+    import subprocess
+    r = subprocess.run(NOTES_CMD, shell=True, capture_output=True, timeout=timeout, input=prompt.encode())
+    text = r.stdout.decode().strip()
+    if r.returncode != 0 or not text:
+        raise RuntimeError(r.stderr.decode().strip()[-200:] or "notes command returned nothing")
+    return text
+
+
+class LiveDirector:
+    """Watches the newest session's key-notes; every new note (thoth only writes
+    one when something new happened — SKIP otherwise) becomes a job: director LLM
+    → context+scene → Gemini image of LIVE_CAST, with the previous live frame as
+    continuity. One job at a time; a newer pending job replaces an older one, and
+    a GM direction always beats an auto beat. Frames land in generated-images/
+    <sid>/NNN-SS.png (NNN = note index), so the studio can promote them later."""
+
+    def __init__(self, auto: bool):
+        self.lock = threading.Condition()
+        self.auto = auto
+        self.continuity = True
+        self.model = LIVE_MODEL
+        self.cast = [n for n in LIVE_CAST if self._avatar(n)]
+        self.sid: str | None = None
+        self.seen_notes = 0
+        self.last_beat_t = 0.0  # transcript time of the last self-triggered beat (no-notes mode)
+        self.pending: dict | None = None
+        self.status = "idle"
+        self.error = ""
+        self.history: list[dict] = []
+        threading.Thread(target=self._watch, daemon=True).start()
+        threading.Thread(target=self._work, daemon=True).start()
+
+    @staticmethod
+    def _avatar(name: str) -> Path | None:
+        return next((p for p in AVATARS.glob(f"{name}.*")
+                     if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")), None)
+
+    def _load_history(self, sid: str) -> list[dict]:
+        out = []
+        d = STAGING / sid
+        for j in sorted(d.glob("*.json")) if d.is_dir() else []:
+            meta = json.loads(j.read_text())
+            if meta.get("live") and j.with_suffix(".png").exists():
+                out.append({"url": f"/generated/{sid}/{j.stem}.png", **meta})
+        return sorted(out, key=lambda m: m.get("made", 0))
+
+    def _notes(self, sid: str) -> list[dict]:
+        p = SESSIONS / f"key-notes-{sid}.md"
+        return parse_notes(p) if p.exists() else []
+
+    def _watch(self):
+        while True:
+            try:
+                sid = live_session()
+                with self.lock:
+                    if sid and sid != self.sid:  # new session: adopt it, don't backfill old notes
+                        self.sid = sid
+                        self.history = self._load_history(sid)
+                        self.seen_notes = len(self._notes(sid))
+                        self.last_beat_t = self._transcript_end(sid)
+                    if self.sid:
+                        fire = False
+                        if (SESSIONS / f"key-notes-{self.sid}.md").exists():
+                            notes = self._notes(self.sid)
+                            if len(notes) > self.seen_notes:
+                                self.seen_notes, fire = len(notes), True
+                        else:  # thoth ran without --notes: cut our own beats on transcript time
+                            end = self._transcript_end(self.sid)
+                            if end - self.last_beat_t >= LIVE_BEAT or (not self.history and end >= 45 and self.last_beat_t == 0):
+                                self.last_beat_t, fire = end, True
+                        if fire and self.auto and (not self.pending or self.pending["source"] == "auto"):
+                            self.pending = {"source": "auto", "direction": ""}
+                            self.lock.notify_all()
+            except Exception as e:
+                self.error = f"watcher: {e}"
+            time.sleep(3)
+
+    @staticmethod
+    def _transcript_end(sid: str) -> float:
+        p = SESSIONS / f"session-{sid}.md"
+        rows = parse_stamped_lines(p) if p.exists() else []
+        return rows[-1][0] if rows else 0.0
+
+    def request(self, direction: str, literal: bool) -> None:
+        with self.lock:
+            if not self.sid:
+                raise RuntimeError("no session found in sessions/ — start thoth first")
+            self.pending = {"source": "direct", "direction": direction.strip(), "literal": literal}
+            self.lock.notify_all()
+
+    def _work(self):
+        while True:
+            with self.lock:
+                while not self.pending:
+                    self.lock.wait()
+                job, self.pending = self.pending, None
+            try:
+                self._run(job)
+                self.error = ""
+            except Exception as e:
+                self.error = str(e)[:400]
+            self.status = "idle"
+
+    def _run(self, job: dict):
+        sid = self.sid
+        notes = self._notes(sid)
+        note = dict(notes[-1]) if notes else {"t": self._transcript_end(sid), "headline": "", "body": ""}
+        if job["source"] == "direct" or not notes:
+            note["t"] = self._transcript_end(sid)  # stamp manual/self-cut beats at "now"
+        idx = max(len(notes) - 1, 0)
+        cf = context_file(sid)
+        context = cf.read_text().strip() if cf.exists() else ""
+        prev = self.history[-1] if self.history else None
+
+        if job.get("literal") and job["direction"]:
+            scene = job["direction"]  # GM wrote the scene verbatim; keep the setting
+        else:
+            self.status = "directing"
+            transcript = SESSIONS / f"session-{sid}.md"
+            rows = parse_stamped_lines(transcript) if transcript.exists() else []
+            end = rows[-1][0] if rows else 0
+            text = "\n".join(t for ts, t in rows if ts >= end - LIVE_WINDOW)[-8000:]
+            gloss = AVATARS / "glossary.md"
+            out = run_notes_cmd(DIRECTOR_PROMPT.format(
+                names=", ".join(self.cast),
+                direction=DIRECTION_CLAUSE.format(direction=job["direction"]) if job["direction"] else "",
+                glossary=("\n\nGlossary (correct spellings):\n" + gloss.read_text().strip()) if gloss.exists() else "",
+                context=context or "(none yet — infer it)",
+                headline=note["headline"] or "(none yet)",
+                text=text or "(no transcript yet)",
+            ))
+            out = out.replace("**", "").replace("__", "")  # haiku likes markdown-bolding section labels
+            m = re.search(r"CONTEXT:\s*(.*?)\s*SCENE:\s*(.*)", out, re.S | re.I)
+            if m:
+                context, scene = m.group(1).strip(), m.group(2).strip()
+            else:
+                scene = out
+            if h := re.search(r"HEADLINE:\s*(.+)", out, re.I):
+                note["headline"] = h.group(1).strip().strip('"')  # director's caption is fresher than the last note
+            cf.write_text(context)
+
+        self.status = "painting"
+        cont_path = None
+        if self.continuity and prev:
+            p = STAGING / sid / Path(prev["url"]).name
+            cont_path = p if p.is_file() else None
+        prompt = build_prompt(context, scene, self.cast, cont_path is not None)
+        png = gemini_generate(prompt, self.cast, self.model, "16:9", cont_path)
+        dest_dir = STAGING / sid
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        serial = len(list(dest_dir.glob(f"{idx:03d}-*.png")))
+        dest = dest_dir / f"{idx:03d}-{serial:02d}.png"
+        dest.write_bytes(png)
+        meta = {"prompt": prompt, "context": context, "scene": scene, "avatars": self.cast,
+                "aspect": "16:9", "continuity": prev["url"] if cont_path else None,
+                "headline": note["headline"], "stamp": stamp(note["t"]), "model": self.model,
+                "live": True, "source": job["source"], "direction": job["direction"], "made": time.time()}
+        dest.with_suffix(".json").write_text(json.dumps(meta, indent=2))
+        with self.lock:
+            self.history.append({"url": f"/generated/{sid}/{dest.name}", **meta})
+
+    def state(self) -> dict:
+        cf = context_file(self.sid) if self.sid else None
+        notes = self._notes(self.sid) if self.sid else []
+        return {
+            "sid": self.sid, "auto": self.auto, "continuity": self.continuity, "model": self.model,
+            "models": MODELS, "cast": self.cast, "status": self.status, "error": self.error,
+            "queued": bool(self.pending), "notes": len(notes), "beat": LIVE_BEAT,
+            "trigger": "key-notes" if self.sid and (SESSIONS / f"key-notes-{self.sid}.md").exists() else "transcript",
+            "headline": notes[-1]["headline"] if notes else "",
+            "context": cf.read_text() if cf and cf.exists() else "",
+            "history": [{k: h.get(k) for k in ("url", "headline", "stamp", "scene", "source", "direction", "made")}
+                        for h in self.history[-60:]],
+        }
+
+
+DIRECTOR: LiveDirector | None = None
+
+
 def rebuild_gallery_md(sid: str) -> None:
     gdir = GALLERY / sid
     caps_path = gdir / "captions.json"
@@ -349,6 +567,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/" or self.path.startswith("/index"):
             self._send(200, (ROOT / "studio.html").read_bytes(), "text/html; charset=utf-8")
+        elif self.path in ("/live", "/live/"):
+            self._send(200, (ROOT / "live.html").read_bytes(), "text/html; charset=utf-8")
+        elif self.path == "/api/live":
+            self._send(200, json.dumps(DIRECTOR.state()).encode())
         elif self.path == "/api/state":
             self._send(200, json.dumps(load_state()).encode())
         elif self.path.startswith("/avatars/"):
@@ -367,7 +589,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0)) or b"{}"))
         try:
-            if self.path == "/api/generate":
+            if self.path == "/api/live/direct":
+                DIRECTOR.request(payload.get("direction", ""), bool(payload.get("literal")))
+                self._send(200, b"{}")
+            elif self.path == "/api/live/settings":
+                for k in ("auto", "continuity"):
+                    if k in payload:
+                        setattr(DIRECTOR, k, bool(payload[k]))
+                if payload.get("model") in MODELS:
+                    DIRECTOR.model = payload["model"]
+                if "context" in payload and DIRECTOR.sid:
+                    context_file(DIRECTOR.sid).write_text(payload["context"])
+                self._send(200, json.dumps(DIRECTOR.state()).encode())
+            elif self.path == "/api/generate":
                 sid, idx = payload["sid"], int(payload["idx"])
                 model = payload.get("model", IMAGE_MODEL)
                 aspect = payload.get("aspect", "16:9")
@@ -485,11 +719,21 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    import argparse
+    ap = argparse.ArgumentParser(description="thoth studio — curation UI + live stage")
+    ap.add_argument("--live", action="store_true",
+                    help=f"auto-paint {', '.join(LIVE_CAST)} on every new key-note of the running session; opens /live")
+    args = ap.parse_args()
     if not SESSIONS.is_dir():
         sys.exit("run from the thoth repo (no sessions/ here)")
+    global DIRECTOR
+    DIRECTOR = LiveDirector(auto=args.live)
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"𓅝 thoth studio → http://localhost:{PORT}  (Ctrl-C to stop)")
-    threading.Timer(0.4, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
+    page = "/live" if args.live else ""
+    print(f"𓅝 thoth studio → http://localhost:{PORT}   live stage → http://localhost:{PORT}/live  (Ctrl-C to stop)")
+    if args.live:
+        print(f"   auto-paint ON · cast {', '.join(DIRECTOR.cast)} · {DIRECTOR.model}")
+    threading.Timer(0.4, lambda: webbrowser.open(f"http://localhost:{PORT}{page}")).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
