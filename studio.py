@@ -128,7 +128,10 @@ COMMAND_PROMPT = (
 )
 CONTINUITY_PROMPT = (
     "The FINAL attached image is the previous keyframe of this sequence — maintain "
-    "its palette, lighting, time of day, and visual continuity."
+    "its palette, lighting, time of day, and visual continuity. Do NOT copy its "
+    "creatures, crowds, or extra figures: only the people the Scene names appear. "
+    "Never copy how the CHARACTERS look from it (faces, skin, hair, outfits drift frame "
+    "to frame) — redraw every character fresh from their own reference portrait."
 )
 ASPECTS = ["16:9", "1:1", "9:16", "4:3", "3:4"]
 
@@ -190,6 +193,10 @@ def build_prompt(context: str, scene: str, avatar_names: list[str], continuity: 
     if context.strip():
         parts.append("Context: " + context.strip())
     parts.append("Scene: " + scene.strip())
+    if len(avatar_names) > 1:  # field bug: 4 refs in, Punchy silently dropped from frame
+        parts.append(f"HEADCOUNT: all {len(avatar_names)} reference characters — {', '.join(avatar_names)} — "
+                     "must be fully visible in the frame, each recognizable. Do not omit, crop out, or merge anyone; "
+                     "widen the shot if needed.")
     if continuity:
         parts.append(CONTINUITY_PROMPT)
     return "\n\n".join(parts)
@@ -354,6 +361,7 @@ def gemini_generate(prompt: str, avatar_names: list[str], model: str,
         matches = [p for p in AVATARS.glob(f"{name}.*") if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")]
         if not matches:
             raise RuntimeError(f"no avatar image for {name!r}")
+        parts.append({"text": f"Reference portrait of {name} — match this face exactly:"})
         parts.append(image_part(matches[0]))
     if continuity_path is not None:
         parts.append(image_part(continuity_path))  # last, as CONTINUITY_PROMPT promises
@@ -382,7 +390,7 @@ def gemini_generate(prompt: str, avatar_names: list[str], model: str,
 
 # ── live stage: auto-illustrate the running session (second-monitor view at /live) ──
 
-LIVE_CAST = [n.strip() for n in os.environ.get("THOTH_LIVE_CAST", "Corvus,Punchy,Stone").split(",") if n.strip()]
+LIVE_CAST = [n.strip() for n in os.environ.get("THOTH_LIVE_CAST", "Avril,Corvus,Punchy,Stone").split(",") if n.strip()]
 LIVE_MODEL = os.environ.get("THOTH_LIVE_MODEL", IMAGE_MODEL)
 LIVE_WINDOW = float(os.environ.get("THOTH_LIVE_WINDOW", 900))  # seconds of transcript the director reads per beat
 LIVE_CHARS = 30000  # cap on that excerpt (newest kept) — haiku reads it in ~10 s
@@ -404,7 +412,10 @@ DIRECTOR_PROMPT = (
     "descriptor). Keep the established setting unless the story clearly moved.\n"
     "SCENE: under 120 words — the single strongest instant of action right now: "
     "composition and camera angle, what each of {names} is doing and where they "
-    "are in frame, mood. Purely visual.{glossary}{canon}\n\n"
+    "are in frame, mood. Purely visual. Cast discipline: include an NPC or creature "
+    "ONLY if the last ~90 seconds of transcript put them physically in this scene — "
+    "never carry them over from earlier beats, and never invent crowds of them; "
+    "unnamed townsfolk are human background extras.{glossary}{canon}\n\n"
     "Story so far:\n{story}\n\nRecently painted:\n{painted}\n\n"
     "Established setting: {context}\n\nLatest headline: {headline}\n\n"
     "Transcript:\n{text}"
@@ -635,7 +646,9 @@ class LiveDirector:
         return {
             "sid": self.sid, "auto": self.auto, "continuity": self.continuity, "pinned": self.pinned, "model": self.model,
             "discord": self.discord, "discord_ready": bool(discord_webhook()), "discord_error": self.discord_error,
-            "models": MODELS, "cast": self.cast, "status": self.status, "error": self.error,
+            "models": MODELS, "cast": self.cast,
+            "roster": sorted(p.stem for p in AVATARS.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")),
+            "status": self.status, "error": self.error,
             "queued": bool(self.pending), "notes": len(notes), "beat": LIVE_BEAT,
             "trigger": "key-notes" if self.sid and (SESSIONS / f"key-notes-{self.sid}.md").exists() else "transcript",
             "headline": notes[-1]["headline"] if notes else "",
@@ -716,6 +729,8 @@ class Handler(BaseHTTPRequestHandler):
                     DIRECTOR.discord = bool(payload["discord"]) and bool(discord_webhook())
                 if "pinned" in payload:
                     DIRECTOR._set_pinned(bool(payload["pinned"]))
+                if isinstance(payload.get("cast"), list):  # who is on stage (e.g. Avril teleported away)
+                    DIRECTOR.cast = [n for n in payload["cast"] if isinstance(n, str) and DIRECTOR._avatar(n)]
                 self._send(200, json.dumps(DIRECTOR.state()).encode())
             elif self.path == "/api/generate":
                 sid, idx = payload["sid"], int(payload["idx"])

@@ -115,6 +115,7 @@ body.idle #tab,body.open #tab{opacity:0}
       <label class="toggle" id="discord-wrap"><input type="checkbox" id="t-discord"> post to Discord</label>
       <select id="model"></select>
     </div>
+    <div class="row" id="cast" title="who is on stage — their portraits go to every frame"></div>
     <div class="hint">D drawer · F fullscreen · ← → browse · L back to live · Esc close</div>
   </div>
   <div id="strip"></div>
@@ -169,6 +170,17 @@ function render() {
   const sel = $("#model");
   if (!sel.options.length) for (const [id, lbl] of Object.entries(S.models)) sel.add(new Option(lbl, id));
   sel.value = S.model;
+  const castEl = $("#cast");
+  if (castEl.dataset.k !== S.roster.join() + "|" + S.cast.join()) {
+    castEl.dataset.k = S.roster.join() + "|" + S.cast.join();
+    castEl.innerHTML = "";
+    for (const n of S.roster) {
+      const l = document.createElement("label"); l.className = "toggle";
+      const c = document.createElement("input"); c.type = "checkbox"; c.checked = S.cast.includes(n);
+      c.onchange = () => api("/api/live/settings", {cast: [...castEl.querySelectorAll("input")].filter(i => i.checked).map(i => i.parentNode.textContent.trim())});
+      l.append(c, " " + n); castEl.append(l);
+    }
+  }
   if (!ctxDirty && document.activeElement !== $("#context")) $("#context").value = S.context;
   const strip = $("#strip");
   if (strip.childElementCount !== h.length) {

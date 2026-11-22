@@ -236,12 +236,16 @@ def imagine(notes_path: Path, avatars_dir: Path, model: str, post_cmd: str | Non
                 k, v = line.split(":", 1)
                 party[k.strip()] = v.strip()
     names = "; ".join(f"{p.stem} — {party[p.stem]}" if p.stem in party else p.stem for p in avatars)
-    avatar_parts = [
-        {"inline_data": {
-            "mime_type": "image/jpeg" if p.suffix.lower() in (".jpg", ".jpeg") else f"image/{p.suffix.lower().lstrip('.')}",
-            "data": base64.b64encode(p.read_bytes()).decode(),
-        }}
+    avatar_parts = [  # each portrait is preceded by its name so the model can't swap faces
+        part
         for p in avatars
+        for part in (
+            {"text": f"Reference portrait of {p.stem} — match this face exactly:"},
+            {"inline_data": {
+                "mime_type": "image/jpeg" if p.suffix.lower() in (".jpg", ".jpeg") else f"image/{p.suffix.lower().lstrip('.')}",
+                "data": base64.b64encode(p.read_bytes()).decode(),
+            }},
+        )
     ]
 
     sid = notes_path.stem.removeprefix("key-notes-enriched-").removeprefix("key-notes-")
